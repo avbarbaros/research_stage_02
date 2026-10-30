@@ -26,7 +26,7 @@ models:
 # E2.1 — CoT from scratch
 # ---------------------------------------------------------------------------
 e2_1:
-  dataset: "gsm8k"
+  dataset: "openai/gsm8k"
   dataset_config: "main"
   split: "test"
   n_eval: 500                  # set to null to use all 1319
@@ -70,7 +70,7 @@ e2_1:
 # E2.2 — Self-consistency (majority voting)
 # ---------------------------------------------------------------------------
 e2_2:
-  dataset: "gsm8k"
+  dataset: "openai/gsm8k"
   dataset_config: "main"
   split: "test"
   n_eval: 300
@@ -121,7 +121,7 @@ e2_3:
 # E2.4 — Verifier study
 # ---------------------------------------------------------------------------
 e2_4:
-  dataset: "gsm8k"
+  dataset: "openai/gsm8k"
   dataset_config: "main"
   n_train_traces: 5000
   n_eval: 300
