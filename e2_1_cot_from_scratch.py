@@ -144,7 +144,7 @@ _TRIGGERS = [
     r"####[\s]+",
     r"answer[:\s]+",
 ]
-_NUM_PAT = r"(-?[\d,]+\.?\d*)"
+_NUM_PAT = r"(-?[\d,]+(?:\.\d+)?)"
 
 
 def extract_pred(text: str) -> str | None:
