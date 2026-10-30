@@ -10,8 +10,8 @@ common:
   device: "cuda"               # "cuda" | "cpu"
   dtype: "bfloat16"            # "bfloat16" | "float16" | "float32"
   output_dir: "outputs"        # local output dir (always written)
-  drive_output_dir: ""         # Google Drive path, e.g. "/content/drive/MyDrive/research_stage_02/outputs"
-                               # leave blank to skip Drive save
+  drive_output_dir: "/content/drive/MyDrive/research_stage_02/outputs" # leave blank to skip Drive save
+                               
 
 # ---------------------------------------------------------------------------
 # Models
