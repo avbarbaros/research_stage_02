@@ -16,8 +16,10 @@ research_stage_02/
 ├── few_shot_exemplars.jsonl     # 8 hand-written GSM8K-style CoT exemplars (edit freely)
 ├── few_shot_exemplars_wei.jsonl # the standard 8 GSM8K CoT exemplars from Wei et al. (2022)
 │
+├── reasoning_utils.py           # shared: GSM8K subset, answer extraction, statistics
 ├── e2_1_cot_from_scratch.py     # E2.1 — direct / zero-shot CoT / two few-shot CoT variants
-│                                #        (scripts for E2.2–E2.4 to be added)
+├── e2_2_self_consistency.py     # E2.2 — self-consistency (majority voting over sampled CoT)
+│                                #        (scripts for E2.3–E2.4 to be added)
 │
 └── outputs/                     # Created at runtime; all result JSONs land here
     └── e2_1_results.json
@@ -106,6 +108,7 @@ All knobs live in `config.yaml` under the `e2_1` section — no code edits neede
 | `e2_1.prompts.few_shot_cot.system` | see file | System prompt for few-shot CoT |
 | `e2_1.generation.direct.max_new_tokens` | 64 | Token budget for direct condition |
 | `e2_1.generation.cot.max_new_tokens` | 512 | Token budget for CoT conditions |
+| `e2_1.generation.*.repetition_penalty` | 1.0 | Overrides Qwen's hidden default of 1.05, so decoding is plain greedy |
 | `models.main` | `Qwen/Qwen2.5-7B-Instruct` | Inference model |
 
 ### Few-shot exemplars
@@ -171,12 +174,80 @@ response with no truncation:
 
 ---
 
+## E2.2 — Self-consistency
+
+**Goal:** sample several chain-of-thought answers per question, take the majority answer, and
+measure how accuracy grows with the number of samples k.
+
+**Paper:** Wang et al. (2022) arXiv:2203.11171
+
+### How it works
+
+- The prompt is the same as E2.1 `zero_shot_cot`, so the only change is sampling + voting.
+- For each question, `max(k_values)` = 32 samples are drawn once (T=0.7, top_p=0.95).
+- For each smaller k, the reported accuracy is the **expected** majority-vote accuracy over
+  `n_resamples` random k-subsets of those 32 samples. This gives a smoother curve than
+  using only the first k samples. The 95% CI is a bootstrap over questions.
+- **Voting:** answers are compared numerically ("18.0" = "18"). Samples with no number do
+  not vote, and ties go to the answer seen first.
+- **Any-correct rate:** the share of questions where at least one of the k samples is right.
+  This is the upper bound for any answer-selection method, including the verifiers in E2.4.
+- **Agreement bins:** accuracy split by how many of the 32 samples back the winning answer.
+- The same seed as E2.1 means E2.2's 300 questions are exactly E2.1's first 300.
+  Pass an E2.1 results file as `--greedy_ref` to get an exact McNemar test of greedy CoT
+  vs. self-consistency at k=32.
+
+**Sampling settings:** Qwen2.5's `generation_config.json` adds `top_k=20` and
+`repetition_penalty=1.05` unless they are overridden. E2.2 sets `top_k: 0` and
+`repetition_penalty: 1.0` in the config, so only temperature and top_p apply.
+
+### Run
+
+```bash
+# Full run (300 questions × 32 samples). Resumes automatically after a disconnect.
+python e2_2_self_consistency.py
+
+# Smoke test
+python e2_2_self_consistency.py --n_eval 5
+
+# Compare with E2.1 greedy zero-shot CoT
+python e2_2_self_consistency.py --greedy_ref outputs/e2_1_results_YYYYMMDD_HHMM.json
+
+# Start over, discarding the checkpoint
+python e2_2_self_consistency.py --fresh
+
+# Re-analyse a checkpoint without loading the model (CPU is fine)
+python e2_2_self_consistency.py --analyze_only /content/drive/MyDrive/research_stage_02/outputs/e2_2_checkpoint.jsonl
+```
+
+**Checkpointing:** each finished question is appended to `e2_2_checkpoint.jsonl`, on Google
+Drive when `drive_output_dir` is set. Re-running the same command continues from the last
+finished question. If the sampling settings in `config.yaml` have changed, the script stops
+and asks you to use `--fresh`. Increasing `n_eval` later is fine, because the question
+order doesn't depend on `n_eval`.
+
+### Configuration (`e2_2` in `config.yaml`)
+
+| Key | Default | What it controls |
+|-----|---------|-----------------|
+| `n_eval` | 300 | Questions evaluated |
+| `k_values` | `[1, 4, 8, 16, 32]` | Vote sizes; the largest sets samples per question |
+| `n_resamples` | 100 | Random subsets per (question, k) |
+| `n_bootstrap` | 1000 | Bootstrap resamples for the CI |
+| `generation.temperature` / `top_p` | 0.7 / 0.95 | Sampling |
+| `generation.top_k` / `repetition_penalty` | 0 / 1.0 | Disable Qwen's hidden defaults |
+| `generation.samples_per_batch` | 32 | Samples generated in parallel; lower on OOM |
+| `greedy_ref` | `""` | E2.1 results JSON for the McNemar comparison |
+| `checkpoint_file` | `e2_2_checkpoint.jsonl` | Checkpoint file name |
+
+---
+
 ## Planned experiments
 
 | ID | Script | Status |
 |----|--------|--------|
 | E2.1 | `e2_1_cot_from_scratch.py` | Ready |
-| E2.2 | `e2_2_self_consistency.py` | Planned |
+| E2.2 | `e2_2_self_consistency.py` | Ready |
 | E2.3 | `e2_3_grpo_by_hand.py` | Planned |
 | E2.4 | `e2_4_verifier_study.py` | Planned |
 

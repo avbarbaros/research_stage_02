@@ -29,7 +29,7 @@ e2_1:
   dataset: "openai/gsm8k"
   dataset_config: "main"
   split: "test"
-  n_eval: 500                  # set to null to use all 1319
+  n_eval: 300                  # set to null to use all 1319
 
   conditions:
     - "direct"
@@ -65,14 +65,18 @@ e2_1:
         Solve each problem step by step and end with 'The answer is <number>.'
       exemplars_file: "few_shot_exemplars_wei.jsonl"
 
-  # ---- Generation ----
+  # ---- Generation (greedy) ----
+  # Qwen2.5's generation_config.json adds repetition_penalty=1.05 unless
+  # overridden; 1.0 disables it so decoding is plain greedy.
   generation:
     direct:
       max_new_tokens: 64
       do_sample: false
-    cot:                       # applies to zero_shot_cot and few_shot_cot
+      repetition_penalty: 1.0
+    cot:                       # applies to all CoT conditions
       max_new_tokens: 512
       do_sample: false
+      repetition_penalty: 1.0
 
 # ---------------------------------------------------------------------------
 # E2.2 — Self-consistency (majority voting)
@@ -81,10 +85,15 @@ e2_2:
   dataset: "openai/gsm8k"
   dataset_config: "main"
   split: "test"
-  n_eval: 300
+  n_eval: 300                  # same seed as E2.1 → these are E2.1's first 300 questions
 
+  # max(k_values) samples are drawn per question once; smaller k are evaluated
+  # by voting over random subsets of those samples (n_resamples subsets per k).
   k_values: [1, 4, 8, 16, 32]
+  n_resamples: 100             # subsets per (question, k) for the expected accuracy
+  n_bootstrap: 1000            # bootstrap resamples over questions for 95% CIs
 
+  # Same prompt as E2.1 zero_shot_cot, so k=1 vs greedy isolates the effect of sampling.
   prompts:
     system: >-
       You are a math assistant.
@@ -96,6 +105,19 @@ e2_2:
     do_sample: true
     temperature: 0.7
     top_p: 0.95
+    # Qwen2.5's generation_config.json silently adds top_k=20 and
+    # repetition_penalty=1.05. Set explicitly so only temperature/top_p apply.
+    top_k: 0                   # 0 = disabled
+    repetition_penalty: 1.0    # 1.0 = disabled
+    samples_per_batch: 32      # sequences generated in parallel; lower to 16/8 on OOM
+
+  # Optional: path to an E2.1 results JSON. Its zero_shot_cot (greedy) records are
+  # matched to E2.2 questions by text and compared with an exact McNemar test.
+  greedy_ref: ""
+
+  # Checkpoint after every question so a Colab disconnect doesn't lose the run.
+  # Written to drive_output_dir when set, otherwise output_dir.
+  checkpoint_file: "e2_2_checkpoint.jsonl"
 
 # ---------------------------------------------------------------------------
 # E2.3 — GRPO by hand

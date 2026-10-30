@@ -26,9 +26,7 @@ Usage:
   python e2_1_cot_from_scratch.py --n_eval 100
 """
 
-import re
 import json
-import math
 import time
 import random
 import argparse
@@ -40,6 +38,11 @@ import yaml
 import torch
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
+
+from reasoning_utils import (
+    select_subset, extract_gt, extract_pred, is_correct,
+    wilson_ci, paired_compare, run_self_tests,
+)
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -127,126 +130,14 @@ if torch.cuda.is_available():
 # ---------------------------------------------------------------------------
 print(f"\nLoading {e21['dataset']} ...")
 ds = load_dataset(e21["dataset"], e21["dataset_config"])
-test_data = list(ds[e21["split"]])
-if n_eval is not None:
-    random.shuffle(test_data)
-    test_data = test_data[:n_eval]
+test_data = select_subset(ds[e21["split"]], n_eval, seed)
 print(f"Using {len(test_data)} / {len(ds[e21['split']])} examples")
 
 # ---------------------------------------------------------------------------
-# Answer extraction
-#
-# Documented pitfalls (recorded here for the Stage 2 gate-check):
-#   1. Numbers with commas  (1,234)  → strip before float()
-#   2. Numbers with units   ("42 apples") → regex doesn't require end-of-string
-#   3. Multiple candidates  → trigger phrase wins; else last number in text
-#   4. Negative / decimal   → pattern includes '-' and '.'
-#   5. No number at all     → return None (counts as wrong, no crash)
+# Answer extraction + statistics: shared with other experiments
+# (see reasoning_utils.py for the documented extraction pitfalls)
 # ---------------------------------------------------------------------------
-
-def extract_gt(raw: str) -> str:
-    """Ground-truth integer after '####' in GSM8K answer field."""
-    m = re.search(r"####\s*([\-\d,\.]+)", raw)
-    if m:
-        return m.group(1).replace(",", "").strip()
-    raise ValueError(f"No '####' in: {raw!r}")
-
-
-_TRIGGERS = [
-    r"the answer is[:\s]+",
-    r"the final answer is[:\s]+",
-    r"therefore[,\s]+the answer is[:\s]+",
-    r"so the answer is[:\s]+",
-    r"####[\s]+",
-    r"answer[:\s]+",
-]
-_NUM_PAT = r"(-?[\d,]+(?:\.\d+)?)"
-
-
-def extract_pred(text: str) -> str | None:
-    """
-    Extract numeric answer from model output.
-    Priority: last trigger-phrase match → last number in text.
-    """
-    low = text.lower()
-    last_match = None
-    for trigger in _TRIGGERS:
-        for m in re.finditer(trigger + _NUM_PAT, low):
-            last_match = m
-    if last_match:
-        return last_match.group(1).replace(",", "").strip()
-    nums = re.findall(_NUM_PAT, text)
-    if nums:
-        return nums[-1].replace(",", "").strip()
-    return None
-
-
-def is_correct(pred: str | None, gt: str) -> bool:
-    if pred is None:
-        return False
-    try:
-        return float(pred) == float(gt)
-    except ValueError:
-        return False
-
-
-# Sanity checks
-assert extract_gt("steps\n#### 42") == "42"
-assert extract_gt("steps\n#### 1,234") == "1234"
-assert extract_pred("The answer is 42 apples.") == "42"
-assert extract_pred("Therefore, the answer is -5.") == "-5"
-assert extract_pred("She earns $315.") == "315"
-assert extract_pred("No numbers here") is None
-print("Extraction sanity checks passed.")
-
-# ---------------------------------------------------------------------------
-# Statistics (stdlib only)
-# ---------------------------------------------------------------------------
-
-def wilson_ci(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
-    """Wilson score 95% CI for a proportion, in percent."""
-    if n == 0:
-        return (0.0, 0.0)
-    p = k / n
-    denom  = 1 + z**2 / n
-    centre = (p + z**2 / (2 * n)) / denom
-    half   = z * math.sqrt(p * (1 - p) / n + z**2 / (4 * n**2)) / denom
-    return (round(max(0.0, centre - half) * 100, 2), round(min(1.0, centre + half) * 100, 2))
-
-
-def mcnemar_exact(b: int, c: int) -> float:
-    """
-    Exact two-sided McNemar p-value.
-    b = questions only A got right, c = questions only B got right.
-    Under H0 the discordant pairs split 50/50, so this is a binomial test.
-    """
-    n = b + c
-    if n == 0:
-        return 1.0
-    k = min(b, c)
-    tail = sum(math.comb(n, i) for i in range(k + 1)) / 2**n
-    return min(1.0, 2 * tail)
-
-
-def paired_compare(recs_a: list[dict], recs_b: list[dict]) -> dict:
-    """Paired comparison of two conditions evaluated on the same questions."""
-    b = sum(ra["correct"] and not rb["correct"] for ra, rb in zip(recs_a, recs_b))
-    c = sum(rb["correct"] and not ra["correct"] for ra, rb in zip(recs_a, recs_b))
-    n = len(recs_a)
-    acc_a = sum(r["correct"] for r in recs_a) / n * 100
-    acc_b = sum(r["correct"] for r in recs_b) / n * 100
-    return {
-        "a_only_correct": b,
-        "b_only_correct": c,
-        "diff_pp":        round(acc_b - acc_a, 2),   # B minus A, percentage points
-        "mcnemar_p":      round(mcnemar_exact(b, c), 4),
-    }
-
-
-assert wilson_ci(17, 20) == (63.96, 94.76)
-assert mcnemar_exact(3, 0) == 0.25
-assert mcnemar_exact(0, 0) == 1.0
-print("Statistics sanity checks passed.")
+run_self_tests()
 
 # ---------------------------------------------------------------------------
 # Prompt builders  (system prompts and user suffixes read from config.yaml)
@@ -301,8 +192,14 @@ for name, fn in BUILDERS:
 # ---------------------------------------------------------------------------
 
 @torch.inference_mode()
-def generate(messages: list[dict], max_new_tokens: int) -> tuple[str, str]:
-    """Returns (prompt_text, response_text) — both stored verbatim in results."""
+def generate(messages: list[dict], max_new_tokens: int, repetition_penalty: float) -> tuple[str, str]:
+    """
+    Greedy decoding. Returns (prompt_text, response_text), both stored verbatim.
+
+    Qwen2.5's generation_config.json sets do_sample/temperature/top_p/top_k and
+    repetition_penalty=1.05, which generate() applies unless overridden. All of
+    them are set explicitly here so decoding is plain greedy.
+    """
     prompt_text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
@@ -314,6 +211,8 @@ def generate(messages: list[dict], max_new_tokens: int) -> tuple[str, str]:
         do_sample=False,
         temperature=None,
         top_p=None,
+        top_k=None,
+        repetition_penalty=repetition_penalty,
         pad_token_id=tokenizer.eos_token_id,
     )
     response_text = tokenizer.decode(out[0][prompt_len:], skip_special_tokens=True).strip()
@@ -327,7 +226,7 @@ def generate(messages: list[dict], max_new_tokens: int) -> tuple[str, str]:
 CONDITIONS = [
     {"name":       name,
      "build":      fn,
-     "max_tokens": gen_cfg["direct" if name == "direct" else "cot"]["max_new_tokens"]}
+     "gen":        gen_cfg["direct" if name == "direct" else "cot"]}
     for name, fn in BUILDERS
 ]
 if args.condition != "all":
@@ -348,7 +247,8 @@ for cond in CONDITIONS:
     for i, ex in enumerate(test_data):
         gt                   = extract_gt(ex["answer"])
         messages             = cond["build"](ex["question"])
-        prompt_text, response = generate(messages, cond["max_tokens"])
+        prompt_text, response = generate(messages, cond["gen"]["max_new_tokens"],
+                                         cond["gen"]["repetition_penalty"])
         pred                 = extract_pred(response)
         ok                   = is_correct(pred, gt)
 
@@ -425,7 +325,8 @@ if BASELINE in all_records:
               f"{'only this ✓':>11}  {'p-value':>8}")
         print(f"  {'-'*66}")
     for cname in others:
-        cmp = paired_compare(all_records[BASELINE], all_records[cname])
+        cmp = paired_compare([r["correct"] for r in all_records[BASELINE]],
+                             [r["correct"] for r in all_records[cname]])
         comparisons[f"{cname}_vs_{BASELINE}"] = cmp
         print(f"  {cname:<18}  {cmp['diff_pp']:>+9.2f}  {cmp['a_only_correct']:>11}  "
               f"{cmp['b_only_correct']:>11}  {cmp['mcnemar_p']:>8.4f}")
@@ -465,6 +366,7 @@ output = {
     "model":      model_id,
     "n_eval":     len(test_data),
     "seed":       seed,
+    "generation": gen_cfg,
     "summary":    summary,
     "comparisons": comparisons,
     "records":    all_records,

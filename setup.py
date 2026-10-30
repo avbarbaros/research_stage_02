@@ -300,11 +300,13 @@ section("Setup complete")
 print("""
   All checks passed. You can now run:
 
-    python e2_1_cot_from_scratch.py               # all three conditions
+    python e2_1_cot_from_scratch.py               # all four conditions
     python e2_1_cot_from_scratch.py --n_eval 20   # quick smoke test
+    python e2_2_self_consistency.py --n_eval 5    # E2.2 smoke test
 
   Results will be written to:
-    outputs/e2_1_results.json
+    outputs/e2_1_results_<timestamp>.json
+    outputs/e2_2_results_<timestamp>.json
 
   To persist model weights across Colab sessions, mount Google Drive and run:
     python setup.py --hf_cache_dir /content/drive/MyDrive/hf_cache
