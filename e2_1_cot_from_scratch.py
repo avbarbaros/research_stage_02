@@ -290,12 +290,12 @@ for cond in CONDITIONS:
             "correct":      ok,
         })
 
-        if (i + 1) % 50 == 0 or (i + 1) == len(test_data):
-            elapsed = time.time() - t0
-            speed   = (i + 1) / elapsed
-            eta     = max(0, (len(test_data) - i - 1) / speed)
-            print(f"  [{i+1:4d}/{len(test_data)}]  acc={n_ok/(i+1)*100:.1f}%  "
-                  f"extr_fail={n_exfail}  {speed:.1f} ex/s  ETA={eta:.0f}s")
+        elapsed = time.time() - t0
+        speed   = (i + 1) / elapsed
+        eta     = max(0, (len(test_data) - i - 1) / speed)
+        mark    = "✓" if ok else "✗"
+        print(f"  [{i+1:4d}/{len(test_data)}] {mark}  pred={str(pred):>8}  gt={gt:<8}  "
+              f"acc={n_ok/(i+1)*100:.1f}%  {speed:.1f} ex/s  ETA={eta:.0f}s", flush=True)
 
     elapsed = time.time() - t0
     lengths = [len(r["response"]) for r in records]
