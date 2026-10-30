@@ -1,0 +1,148 @@
+# Stage 2 — Reasoning Methods in LLMs
+# Shared configuration for experiments E2.1 through E2.4
+# Edit values here; scripts read this file at startup.
+
+# ---------------------------------------------------------------------------
+# Common
+# ---------------------------------------------------------------------------
+common:
+  seed: 42
+  device: "cuda"               # "cuda" | "cpu"
+  dtype: "bfloat16"            # "bfloat16" | "float16" | "float32"
+  output_dir: "outputs"        # local output dir (always written)
+  drive_output_dir: ""         # Google Drive path, e.g. "/content/drive/MyDrive/research_stage_02/outputs"
+                               # leave blank to skip Drive save
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+models:
+  main: "Qwen/Qwen2.5-7B-Instruct"
+  grpo_policy: "Qwen/Qwen2.5-1.5B-Instruct"   # E2.3: small model for GRPO
+  outcome_rm: ""                                # E2.4: leave blank to train from scratch
+  process_rm: ""
+
+# ---------------------------------------------------------------------------
+# E2.1 — CoT from scratch
+# ---------------------------------------------------------------------------
+e2_1:
+  dataset: "gsm8k"
+  dataset_config: "main"
+  split: "test"
+  n_eval: 500                  # set to null to use all 1319
+  few_shot_file: "few_shot_exemplars.jsonl"
+
+  conditions:
+    - "direct"
+    - "zero_shot_cot"
+    - "few_shot_cot"
+
+  # ---- Prompt templates ----
+  prompts:
+    direct:
+      system: >-
+        You are a math assistant.
+        Output only the final numeric answer — a single number, nothing else.
+      # No user prefix; question is passed as-is
+
+    zero_shot_cot:
+      system: >-
+        You are a math assistant.
+        Think step by step, then state the final answer as: 'The answer is <number>.'
+      user_suffix: "\n\nLet's think step by step."
+
+    few_shot_cot:
+      system: >-
+        You are a math assistant.
+        Solve each problem step by step and end with 'The answer is <number>.'
+      # Exemplars injected from few_shot_file as alternating user/assistant turns
+
+  # ---- Generation ----
+  generation:
+    direct:
+      max_new_tokens: 64
+      do_sample: false
+    cot:                       # applies to zero_shot_cot and few_shot_cot
+      max_new_tokens: 512
+      do_sample: false
+
+# ---------------------------------------------------------------------------
+# E2.2 — Self-consistency (majority voting)
+# ---------------------------------------------------------------------------
+e2_2:
+  dataset: "gsm8k"
+  dataset_config: "main"
+  split: "test"
+  n_eval: 300
+
+  k_values: [1, 4, 8, 16, 32]
+
+  prompts:
+    system: >-
+      You are a math assistant.
+      Think step by step, then state the final answer as: 'The answer is <number>.'
+    user_suffix: "\n\nLet's think step by step."
+
+  generation:
+    max_new_tokens: 512
+    do_sample: true
+    temperature: 0.7
+    top_p: 0.95
+
+# ---------------------------------------------------------------------------
+# E2.3 — GRPO by hand
+# ---------------------------------------------------------------------------
+e2_3:
+  task: "arithmetic"           # "arithmetic" | "string_manipulation"
+  n_train: 2000
+  n_eval: 200
+
+  prompts:
+    system: >-
+      You are a math assistant. Solve the arithmetic problem.
+      Output your reasoning then state the answer as: 'The answer is <number>.'
+
+  grpo:
+    group_size: 8
+    lr: 1.0e-5
+    epochs: 3
+    batch_size: 4
+    max_new_tokens: 128
+    temperature: 0.9
+    kl_coef: 0.01
+    clip_eps: 0.2
+    max_grad_norm: 1.0
+
+  dr_grpo:
+    enabled: true
+    length_penalty_coef: 0.001
+
+# ---------------------------------------------------------------------------
+# E2.4 — Verifier study
+# ---------------------------------------------------------------------------
+e2_4:
+  dataset: "gsm8k"
+  dataset_config: "main"
+  n_train_traces: 5000
+  n_eval: 300
+
+  best_of_n_values: [1, 4, 8, 16, 32]
+
+  prompts:
+    generator_system: >-
+      You are a math assistant.
+      Think step by step, then state the final answer as: 'The answer is <number>.'
+    generator_user_suffix: "\n\nLet's think step by step."
+
+  outcome_rm_training:
+    epochs: 3
+    lr: 2.0e-5
+    batch_size: 16
+    max_seq_len: 512
+
+  process_rm_training:
+    epochs: 3
+    lr: 2.0e-5
+    batch_size: 8
+    max_seq_len: 1024
+    step_label_strategy: "outcome_propagation"
