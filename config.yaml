@@ -30,12 +30,12 @@ e2_1:
   dataset_config: "main"
   split: "test"
   n_eval: 500                  # set to null to use all 1319
-  few_shot_file: "few_shot_exemplars.jsonl"
 
   conditions:
     - "direct"
     - "zero_shot_cot"
-    - "few_shot_cot"
+    - "few_shot_cot"           # hand-written exemplars
+    - "few_shot_cot_wei"       # standard 8 GSM8K exemplars from Wei et al. (2022)
 
   # ---- Prompt templates ----
   prompts:
@@ -51,11 +51,19 @@ e2_1:
         Think step by step, then state the final answer as: 'The answer is <number>.'
       user_suffix: "\n\nLet's think step by step."
 
+    # Few-shot conditions: exemplars are injected as alternating user/assistant turns.
+    # Both use the same system prompt so only the exemplars differ.
     few_shot_cot:
       system: >-
         You are a math assistant.
         Solve each problem step by step and end with 'The answer is <number>.'
-      # Exemplars injected from few_shot_file as alternating user/assistant turns
+      exemplars_file: "few_shot_exemplars.jsonl"
+
+    few_shot_cot_wei:
+      system: >-
+        You are a math assistant.
+        Solve each problem step by step and end with 'The answer is <number>.'
+      exemplars_file: "few_shot_exemplars_wei.jsonl"
 
   # ---- Generation ----
   generation:

@@ -3,13 +3,19 @@ E2.1 — CoT from Scratch
 =======================
 Stage 2, Experiment 2.1 · Multimodal Reasoning Thesis Roadmap
 
-Three prompting conditions on GSM8K with a 7B model:
-  direct        — answer immediately, no reasoning
-  zero_shot_cot — "Let's think step by step."  (Kojima et al., 2022)
-  few_shot_cot  — exemplars from few_shot_exemplars.jsonl  (Wei et al., 2022)
+Four prompting conditions on GSM8K with a 7B model:
+  direct           — answer immediately, no reasoning
+  zero_shot_cot    — "Let's think step by step."  (Kojima et al., 2022)
+  few_shot_cot     — hand-written exemplars (few_shot_exemplars.jsonl)
+  few_shot_cot_wei — the standard 8 GSM8K exemplars from Wei et al. (2022)
+                     (few_shot_exemplars_wei.jsonl)
 
-All configuration (prompts, generation params, dataset) lives in config.yaml.
-Exemplars live in few_shot_exemplars.jsonl.
+All configuration (prompts, generation params, dataset, exemplar files) lives
+in config.yaml.
+
+Statistics reported per condition: accuracy with a Wilson 95% CI.
+Each CoT condition is compared to zero_shot_cot (and direct to zero_shot_cot)
+with an exact McNemar test on the paired per-question outcomes.
 
 Dependencies:
   pip install transformers datasets accelerate pyyaml
@@ -22,6 +28,7 @@ Usage:
 
 import re
 import json
+import math
 import time
 import random
 import argparse
@@ -41,7 +48,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--config",    default="config.yaml")
 parser.add_argument("--n_eval",    type=int, default=None, help="Override e2_1.n_eval")
 parser.add_argument("--condition", default="all",
-                    choices=["all", "direct", "zero_shot_cot", "few_shot_cot"])
+                    choices=["all", "direct", "zero_shot_cot", "few_shot_cot", "few_shot_cot_wei"])
 args = parser.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -77,10 +84,19 @@ dtype = dtype_map[common["dtype"]]
 # ---------------------------------------------------------------------------
 # Few-shot exemplars
 # ---------------------------------------------------------------------------
-few_shot_path = Path(e21["few_shot_file"])
-with open(few_shot_path) as f:
-    FEW_SHOT = [json.loads(line) for line in f if line.strip()]
-print(f"Loaded {len(FEW_SHOT)} few-shot exemplars from {few_shot_path}")
+FEW_SHOT_CONDITIONS = ["few_shot_cot", "few_shot_cot_wei"]
+
+
+def load_exemplars(path: str) -> list[dict]:
+    with open(path) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+EXEMPLARS: dict[str, list[dict]] = {}
+for _name in FEW_SHOT_CONDITIONS:
+    _path = prompts[_name]["exemplars_file"]
+    EXEMPLARS[_name] = load_exemplars(_path)
+    print(f"Loaded {len(EXEMPLARS[_name])} exemplars for {_name} from {_path}")
 
 # ---------------------------------------------------------------------------
 # Model
@@ -184,6 +200,55 @@ assert extract_pred("No numbers here") is None
 print("Extraction sanity checks passed.")
 
 # ---------------------------------------------------------------------------
+# Statistics (stdlib only)
+# ---------------------------------------------------------------------------
+
+def wilson_ci(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score 95% CI for a proportion, in percent."""
+    if n == 0:
+        return (0.0, 0.0)
+    p = k / n
+    denom  = 1 + z**2 / n
+    centre = (p + z**2 / (2 * n)) / denom
+    half   = z * math.sqrt(p * (1 - p) / n + z**2 / (4 * n**2)) / denom
+    return (round(max(0.0, centre - half) * 100, 2), round(min(1.0, centre + half) * 100, 2))
+
+
+def mcnemar_exact(b: int, c: int) -> float:
+    """
+    Exact two-sided McNemar p-value.
+    b = questions only A got right, c = questions only B got right.
+    Under H0 the discordant pairs split 50/50, so this is a binomial test.
+    """
+    n = b + c
+    if n == 0:
+        return 1.0
+    k = min(b, c)
+    tail = sum(math.comb(n, i) for i in range(k + 1)) / 2**n
+    return min(1.0, 2 * tail)
+
+
+def paired_compare(recs_a: list[dict], recs_b: list[dict]) -> dict:
+    """Paired comparison of two conditions evaluated on the same questions."""
+    b = sum(ra["correct"] and not rb["correct"] for ra, rb in zip(recs_a, recs_b))
+    c = sum(rb["correct"] and not ra["correct"] for ra, rb in zip(recs_a, recs_b))
+    n = len(recs_a)
+    acc_a = sum(r["correct"] for r in recs_a) / n * 100
+    acc_b = sum(r["correct"] for r in recs_b) / n * 100
+    return {
+        "a_only_correct": b,
+        "b_only_correct": c,
+        "diff_pp":        round(acc_b - acc_a, 2),   # B minus A, percentage points
+        "mcnemar_p":      round(mcnemar_exact(b, c), 4),
+    }
+
+
+assert wilson_ci(17, 20) == (63.96, 94.76)
+assert mcnemar_exact(3, 0) == 0.25
+assert mcnemar_exact(0, 0) == 1.0
+print("Statistics sanity checks passed.")
+
+# ---------------------------------------------------------------------------
 # Prompt builders  (system prompts and user suffixes read from config.yaml)
 # ---------------------------------------------------------------------------
 
@@ -202,19 +267,32 @@ def build_zscot(q: str) -> list[dict]:
     ]
 
 
-def build_fscot(q: str) -> list[dict]:
-    msgs = [{"role": "system", "content": prompts["few_shot_cot"]["system"]}]
-    for ex in FEW_SHOT:
-        msgs.append({"role": "user",      "content": ex["question"]})
-        msgs.append({"role": "assistant", "content": ex["answer"]})
-    msgs.append({"role": "user", "content": q})
-    return msgs
+def make_fscot_builder(cname: str):
+    """Few-shot builder for one condition (system prompt + its own exemplars)."""
+    def build(q: str) -> list[dict]:
+        msgs = [{"role": "system", "content": prompts[cname]["system"]}]
+        for ex in EXEMPLARS[cname]:
+            msgs.append({"role": "user",      "content": ex["question"]})
+            msgs.append({"role": "assistant", "content": ex["answer"]})
+        msgs.append({"role": "user", "content": q})
+        return msgs
+    return build
 
+
+build_fscot     = make_fscot_builder("few_shot_cot")
+build_fscot_wei = make_fscot_builder("few_shot_cot_wei")
+
+BUILDERS = [
+    ("direct",           build_direct),
+    ("zero_shot_cot",    build_zscot),
+    ("few_shot_cot",     build_fscot),
+    ("few_shot_cot_wei", build_fscot_wei),
+]
 
 # Print prompt token counts once for transparency
 sample_q = test_data[0]["question"]
 print("\nPrompt token counts (sample question):")
-for name, fn in [("direct", build_direct), ("zero_shot_cot", build_zscot), ("few_shot_cot", build_fscot)]:
+for name, fn in BUILDERS:
     t = tokenizer.apply_chat_template(fn(sample_q), tokenize=False, add_generation_prompt=True)
     print(f"  {name:<16}: {len(tokenizer.encode(t)):,} tokens")
 
@@ -247,9 +325,10 @@ def generate(messages: list[dict], max_new_tokens: int) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 CONDITIONS = [
-    {"name": "direct",        "build": build_direct, "max_tokens": gen_cfg["direct"]["max_new_tokens"]},
-    {"name": "zero_shot_cot", "build": build_zscot,  "max_tokens": gen_cfg["cot"]["max_new_tokens"]},
-    {"name": "few_shot_cot",  "build": build_fscot,  "max_tokens": gen_cfg["cot"]["max_new_tokens"]},
+    {"name":       name,
+     "build":      fn,
+     "max_tokens": gen_cfg["direct" if name == "direct" else "cot"]["max_new_tokens"]}
+    for name, fn in BUILDERS
 ]
 if args.condition != "all":
     CONDITIONS = [c for c in CONDITIONS if c["name"] == args.condition]
@@ -299,8 +378,11 @@ for cond in CONDITIONS:
 
     elapsed = time.time() - t0
     lengths = [len(r["response"]) for r in records]
+    ci_lo, ci_hi = wilson_ci(n_ok, len(test_data))
     meta = {
         "accuracy":            round(n_ok / len(test_data) * 100, 4),
+        "ci95_low":            ci_lo,
+        "ci95_high":           ci_hi,
         "n_correct":           n_ok,
         "n_total":             len(test_data),
         "extraction_failures": n_exfail,
@@ -317,16 +399,36 @@ for cond in CONDITIONS:
 # ---------------------------------------------------------------------------
 # Summary table
 # ---------------------------------------------------------------------------
-print(f"\n{'='*65}")
+print(f"\n{'='*80}")
 print(f"  SUMMARY  —  {model_id}")
 print(f"  GSM8K test ({len(test_data)} examples, greedy decoding)")
-print(f"{'='*65}")
-print(f"  {'Condition':<18}  {'Accuracy':>10}  {'Extr.fail':>10}  {'AvgRespLen':>11}")
-print(f"  {'-'*55}")
+print(f"{'='*80}")
+print(f"  {'Condition':<18}  {'Accuracy':>9}  {'95% CI (Wilson)':>17}  "
+      f"{'Extr.fail':>9}  {'AvgRespLen':>10}")
+print(f"  {'-'*72}")
 for cname, m in summary.items():
-    print(f"  {cname:<18}  {m['accuracy']:>9.2f}%  "
-          f"{m['extraction_failures']:>10}  {m['resp_len_mean']:>11.0f}")
-print(f"{'='*65}")
+    ci = f"[{m['ci95_low']:.1f}, {m['ci95_high']:.1f}]"
+    print(f"  {cname:<18}  {m['accuracy']:>8.2f}%  {ci:>17}  "
+          f"{m['extraction_failures']:>9}  {m['resp_len_mean']:>10.0f}")
+print(f"{'='*80}")
+
+# ---------------------------------------------------------------------------
+# Paired significance tests (exact McNemar), all against zero_shot_cot
+# ---------------------------------------------------------------------------
+comparisons: dict[str, dict] = {}
+BASELINE = "zero_shot_cot"
+if BASELINE in all_records:
+    others = [c for c in all_records if c != BASELINE]
+    if others:
+        print(f"\n  Paired comparison vs {BASELINE} (exact McNemar)")
+        print(f"  {'Condition':<18}  {'Δacc (pp)':>9}  {'only base ✓':>11}  "
+              f"{'only this ✓':>11}  {'p-value':>8}")
+        print(f"  {'-'*66}")
+    for cname in others:
+        cmp = paired_compare(all_records[BASELINE], all_records[cname])
+        comparisons[f"{cname}_vs_{BASELINE}"] = cmp
+        print(f"  {cname:<18}  {cmp['diff_pp']:>+9.2f}  {cmp['a_only_correct']:>11}  "
+              f"{cmp['b_only_correct']:>11}  {cmp['mcnemar_p']:>8.4f}")
 
 # ---------------------------------------------------------------------------
 # Error analysis: divergent cases between conditions
@@ -352,6 +454,8 @@ if "direct" in all_records and "zero_shot_cot" in all_records:
     show_divergent("direct", "zero_shot_cot")
 if "zero_shot_cot" in all_records and "few_shot_cot" in all_records:
     show_divergent("zero_shot_cot", "few_shot_cot")
+if "zero_shot_cot" in all_records and "few_shot_cot_wei" in all_records:
+    show_divergent("zero_shot_cot", "few_shot_cot_wei")
 
 # ---------------------------------------------------------------------------
 # Save
@@ -362,6 +466,7 @@ output = {
     "n_eval":     len(test_data),
     "seed":       seed,
     "summary":    summary,
+    "comparisons": comparisons,
     "records":    all_records,
 }
 ts = datetime.now().strftime("%Y%m%d_%H%M")

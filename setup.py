@@ -173,6 +173,7 @@ with open(config_path) as f:
 REQUIRED_TOP = ["common", "models", "e2_1", "e2_2", "e2_3", "e2_4"]
 REQUIRED_COMMON = ["seed", "device", "dtype", "output_dir"]
 REQUIRED_MODELS = ["main", "grpo_policy"]
+FEW_SHOT_CONDITIONS = ["few_shot_cot", "few_shot_cot_wei"]
 
 errors = []
 for key in REQUIRED_TOP:
@@ -191,16 +192,20 @@ if "models" in cfg:
 
 if "e2_1" in cfg:
     e21 = cfg["e2_1"]
-    few_shot_path = Path(e21.get("few_shot_file", "few_shot_exemplars.jsonl"))
-    if not few_shot_path.exists():
-        errors.append(f"few_shot_file '{few_shot_path}' not found")
 
-    REQUIRED_PROMPTS = ["direct", "zero_shot_cot", "few_shot_cot"]
+    REQUIRED_PROMPTS = ["direct", "zero_shot_cot", "few_shot_cot", "few_shot_cot_wei"]
     for p in REQUIRED_PROMPTS:
         if p not in e21.get("prompts", {}):
             errors.append(f"Missing e2_1.prompts.{p}")
         elif "system" not in e21["prompts"][p]:
             errors.append(f"Missing e2_1.prompts.{p}.system")
+
+    for p in FEW_SHOT_CONDITIONS:
+        pcfg = e21.get("prompts", {}).get(p, {})
+        if "exemplars_file" not in pcfg:
+            errors.append(f"Missing e2_1.prompts.{p}.exemplars_file")
+        elif not Path(pcfg["exemplars_file"]).exists():
+            errors.append(f"e2_1.prompts.{p}.exemplars_file '{pcfg['exemplars_file']}' not found")
 
 if errors:
     print()
@@ -219,21 +224,23 @@ print(f"     output_dir   : {cfg['common']['output_dir']}")
 # ---------------------------------------------------------------------------
 section("7. Few-shot exemplars")
 
-few_shot_path = Path(cfg["e2_1"]["few_shot_file"])
-with open(few_shot_path) as f:
-    exemplars = [json.loads(line) for line in f if line.strip()]
+for cond in FEW_SHOT_CONDITIONS:
+    few_shot_path = Path(cfg["e2_1"]["prompts"][cond]["exemplars_file"])
+    with open(few_shot_path) as f:
+        exemplars = [json.loads(line) for line in f if line.strip()]
 
-if len(exemplars) == 0:
-    fail(f"{few_shot_path} is empty.")
+    if len(exemplars) == 0:
+        fail(f"{few_shot_path} is empty.")
 
-missing_keys = [i for i, ex in enumerate(exemplars)
-                if "question" not in ex or "answer" not in ex]
-if missing_keys:
-    fail(f"Exemplars at lines {missing_keys} are missing 'question' or 'answer' keys.")
+    missing_keys = [i for i, ex in enumerate(exemplars)
+                    if "question" not in ex or "answer" not in ex]
+    if missing_keys:
+        fail(f"Exemplars at lines {missing_keys} in {few_shot_path} "
+             f"are missing 'question' or 'answer' keys.")
 
-ok(f"{len(exemplars)} exemplars loaded from {few_shot_path}.")
-for i, ex in enumerate(exemplars):
-    print(f"     [{i}] Q: {ex['question'][:70]}...")
+    ok(f"{cond}: {len(exemplars)} exemplars loaded from {few_shot_path}.")
+    for i, ex in enumerate(exemplars):
+        print(f"     [{i}] Q: {ex['question'][:70]}...")
 
 # ---------------------------------------------------------------------------
 # 8. Output directory

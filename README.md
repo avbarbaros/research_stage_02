@@ -14,8 +14,9 @@ toolkit in its original text-only setting before porting ideas to the multimodal
 research_stage_02/
 ├── config.yaml                  # All settings for E2.1–E2.4 (prompts, generation, models)
 ├── few_shot_exemplars.jsonl     # 8 hand-written GSM8K-style CoT exemplars (edit freely)
+├── few_shot_exemplars_wei.jsonl # the standard 8 GSM8K CoT exemplars from Wei et al. (2022)
 │
-├── e2_1_cot_from_scratch.py     # E2.1 — direct / zero-shot CoT / few-shot CoT on GSM8K
+├── e2_1_cot_from_scratch.py     # E2.1 — direct / zero-shot CoT / two few-shot CoT variants
 │                                #        (scripts for E2.2–E2.4 to be added)
 │
 └── outputs/                     # Created at runtime; all result JSONs land here
@@ -43,6 +44,26 @@ three conditions and document every answer-extraction pitfall.
 
 **Papers:** Wei et al. (2022) arXiv:2201.11903 · Kojima et al. (2022) arXiv:2205.11916
 
+### Conditions
+
+| Condition | Prompt |
+|-----------|--------|
+| `direct` | Answer only, no reasoning |
+| `zero_shot_cot` | "Let's think step by step." (Kojima et al.) |
+| `few_shot_cot` | 8 hand-written exemplars (`few_shot_exemplars.jsonl`) |
+| `few_shot_cot_wei` | The standard 8 GSM8K exemplars from Wei et al. (`few_shot_exemplars_wei.jsonl`) |
+
+The two few-shot conditions share the same system prompt, so any difference between them
+comes from the exemplars alone.
+
+### Statistics
+
+- Each condition's accuracy is reported with a **Wilson 95% confidence interval**.
+- Every other condition is compared with `zero_shot_cot` using an **exact McNemar test** on
+  paired per-question outcomes (all conditions see the same questions).
+- With small `n_eval` the intervals are wide. For example, 17/20 gives [64.0, 94.8] %.
+  Use `n_eval >= 300`, or `null` for all 1319, before drawing conclusions.
+
 ### Run
 
 ```bash
@@ -53,6 +74,7 @@ python e2_1_cot_from_scratch.py
 python e2_1_cot_from_scratch.py --condition direct
 python e2_1_cot_from_scratch.py --condition zero_shot_cot
 python e2_1_cot_from_scratch.py --condition few_shot_cot
+python e2_1_cot_from_scratch.py --condition few_shot_cot_wei
 
 # Quick smoke test
 python e2_1_cot_from_scratch.py --n_eval 20
@@ -66,7 +88,7 @@ python e2_1_cot_from_scratch.py --n_eval 200 --condition few_shot_cot
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--config` | `config.yaml` | Path to config file |
-| `--condition` | `all` | `all` / `direct` / `zero_shot_cot` / `few_shot_cot` |
+| `--condition` | `all` | `all` / `direct` / `zero_shot_cot` / `few_shot_cot` / `few_shot_cot_wei` |
 | `--n_eval` | value from config | Number of GSM8K test examples to use |
 
 ### Configuration
@@ -76,7 +98,8 @@ All knobs live in `config.yaml` under the `e2_1` section — no code edits neede
 | Key | Default | What it controls |
 |-----|---------|-----------------|
 | `e2_1.n_eval` | 500 | Examples evaluated per condition |
-| `e2_1.few_shot_file` | `few_shot_exemplars.jsonl` | Path to exemplar file |
+| `e2_1.prompts.few_shot_cot.exemplars_file` | `few_shot_exemplars.jsonl` | Exemplars for `few_shot_cot` |
+| `e2_1.prompts.few_shot_cot_wei.exemplars_file` | `few_shot_exemplars_wei.jsonl` | Exemplars for `few_shot_cot_wei` |
 | `e2_1.prompts.direct.system` | see file | System prompt for direct condition |
 | `e2_1.prompts.zero_shot_cot.system` | see file | System prompt for zero-shot CoT |
 | `e2_1.prompts.zero_shot_cot.user_suffix` | `"\n\nLet's think step by step."` | Appended to each question |
@@ -87,7 +110,8 @@ All knobs live in `config.yaml` under the `e2_1` section — no code edits neede
 
 ### Few-shot exemplars
 
-Edit `few_shot_exemplars.jsonl` to change or extend the exemplars — one JSON object per line:
+Edit `few_shot_exemplars.jsonl` to change or extend the hand-written exemplars. Keep
+`few_shot_exemplars_wei.jsonl` unchanged, since it is the published baseline. One JSON object per line:
 
 ```jsonl
 {"question": "...", "answer": "Step 1 ...\nStep 2 ...\nThe answer is 42."}
@@ -106,9 +130,16 @@ response with no truncation:
   "model": "Qwen/Qwen2.5-7B-Instruct",
   "n_eval": 500,
   "summary": {
-    "direct":        {"accuracy": 72.40, "extraction_failures": 3, "resp_len_mean": 18, ...},
-    "zero_shot_cot": {"accuracy": 84.20, "extraction_failures": 1, "resp_len_mean": 312, ...},
-    "few_shot_cot":  {"accuracy": 86.60, "extraction_failures": 0, "resp_len_mean": 287, ...}
+    "direct":           {"accuracy": 72.40, "ci95_low": 68.3, "ci95_high": 76.1, "extraction_failures": 3, ...},
+    "zero_shot_cot":    {"accuracy": 84.20, "ci95_low": 80.7, "ci95_high": 87.2, ...},
+    "few_shot_cot":     {"accuracy": 86.60, ...},
+    "few_shot_cot_wei": {"accuracy": 85.80, ...}
+  },
+  "comparisons": {
+    "few_shot_cot_vs_zero_shot_cot": {
+      "a_only_correct": 14, "b_only_correct": 26, "diff_pp": 2.4, "mcnemar_p": 0.0807
+    },
+    ...
   },
   "records": {
     "direct": [
