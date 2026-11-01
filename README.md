@@ -189,12 +189,14 @@ A base model has no chat template, so prompts follow the original papers' plain-
 
 | Condition | Prompt | Answer taken from |
 |-----------|--------|-------------------|
-| `direct` | `Q: {question}\nA: The answer (arabic numerals) is` | first number in the completion |
+| `direct` | Wei et al.'s standard prompting: the 8 Wei exemplars with answers only (`A: The answer is 6.`), then `Q: {question}\nA:` | usual trigger / last-number extraction |
 | `zero_shot_cot` | Stage 1: `Q: {question}\nA: Let's think step by step.` · Stage 2: stage 1 + reasoning + `\nTherefore, the answer (arabic numerals) is` (Kojima et al.) | first number after the stage-2 trigger |
 | `few_shot_cot`, `few_shot_cot_wei` | the same exemplar files as `Q: …\nA: …` blocks, then `Q: {question}\nA:` | usual trigger / last-number extraction |
 
-- There is no system prompt, and generation stops at the next `\nQ:` so the model does not
-  invent new questions.
+- There is no system prompt. Generation stops at `\nQ:`, `\nQuestion:` or `\n[Question]`,
+  because a base model otherwise keeps writing and invents new problems.
+- Zero-shot CoT also records the answer stated in the reasoning (`pred_stage1`). The summary
+  counts how often it differs from the Kojima stage-2 answer; that number should be close to 0.
 - Results are saved as `e2_1_results_<timestamp>_base.json`, with `"prompt_format": "completion"`.
 - Run all four conditions **in one job** (~3 h) so the file includes the paired McNemar tests.
   Runs have no checkpoint, so keep the Colab session active.
@@ -329,6 +331,11 @@ python e2_2_self_consistency.py --n_eval 5
 
 # Compare with E2.1 greedy zero-shot CoT
 python e2_2_self_consistency.py --greedy_ref outputs/e2_1_results_YYYYMMDD_HHMM.json
+
+# Base model (Qwen2.5-7B): plain-text prompt from e2_1.base_prompts, own checkpoint
+# (e2_2_checkpoint_base.jsonl) and results file (..._base.json). The greedy reference
+# must be an E2.1 --model base file; a greedy file from another model is refused.
+python e2_2_self_consistency.py --model base --greedy_ref outputs/e2_1_results_YYYYMMDD_HHMM_base.json
 
 # Start over, discarding the checkpoint
 python e2_2_self_consistency.py --fresh

@@ -58,7 +58,9 @@ _TRIGGERS = [
     r"####[\s]+",
     r"answer[:\s]+",
 ]
-_NUM_PAT = r"(-?[\d,]+(?:\.\d+)?)"
+# Must start with a digit: "[\d,]+" alone also matched a bare "," (e.g. in
+# "\boxed{52}, done"), which became the empty string "" after comma removal.
+_NUM_PAT = r"(-?\d[\d,]*(?:\.\d+)?)"
 
 
 def extract_pred(text: str) -> str | None:
@@ -85,8 +87,8 @@ def extract_first_number(text: str) -> str | None:
     (Kojima et al.'s "answer cleansing"): the answer comes first, and anything the
     model writes after it is noise.
     """
-    m = re.search(r"-?\d[\d,]*(?:\.\d+)?", text)
-    return m.group(0).replace(",", "").strip() if m else None
+    m = re.search(_NUM_PAT, text)
+    return m.group(1).replace(",", "").strip() if m else None
 
 
 def canonical(pred: str | None) -> str | None:
@@ -188,6 +190,9 @@ def run_self_tests() -> None:
     assert extract_pred("Therefore, the answer is -5.") == "-5"
     assert extract_pred("She earns $315.") == "315"
     assert extract_pred("No numbers here") is None
+    assert extract_pred("The result is \\boxed{52}, done.") == "52"     # lone comma is not a number
+    assert extract_pred("Total: 1,234, as shown.") == "1234"
+    assert extract_first_number(": 7 apples, then 9") == "7"
 
     assert canonical("18.0") == canonical("18") == canonical("018") == "18"
     assert canonical("2.50") == "2.5"

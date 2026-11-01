@@ -8,11 +8,14 @@ it was met, the full numbers, and what the result means for later stages.
 |---|---|---|---|
 | [E2.1 — CoT from scratch](E2.1_cot_from_scratch.md) | Reproduce the qualitative ordering of direct / zero-shot CoT / few-shot CoT and explain the answer-extraction pitfalls | Direct 21.3% → CoT ~90% (4.2×). Zero-shot CoT ≈ few-shot CoT on this instruction-tuned model. 0 extraction failures in 1,200 responses | ✅ |
 | [E2.2 — Self-consistency](E2.2_self_consistency.md) | A clean scaling curve, with the marginal accuracy per unit of compute stated | 89.1% (k=1) → 93.3% (k=32), saturating by k≈16. +3.0 pp over greedy (McNemar p = 0.023). 0.85 pp per extra sample at small k, ~0.004 pp at k=16–32 | ✅ |
+| [E2.1-B — CoT on the base model](E2.1_base_model.md) | Ablation: does the papers' few-shot > zero-shot ordering appear without instruction tuning? | Run B1 (n = 5): few-shot works (4/5, 5/5). `direct` and `zero_shot_cot` prompts had bugs that invalidate their scores; both fixed in code | ⚠️ rerun (300 q) |
+| [E2.2-B — Self-consistency on the base model](E2.2_base_model.md) | Ablation: SC gains for a weaker single-chain model | The first attempt ran the Instruct model (missing option, now added); its +80 pp "vs greedy" mixes two models and must not be reported | ⚠️ rerun after E2.1-B |
 | E2.3 — GRPO by hand | Training reward increases; length bias shown in own logs | — | ☐ |
 | E2.4 — Verifier study | Process supervision beats outcome supervision at matched n | — | ☐ |
 
 **Common setup:** `Qwen/Qwen2.5-7B-Instruct`, GSM8K test split, the same 300 questions
 (seed 42) in both experiments, so results are directly comparable question by question.
+The `-B` pages are ablations on the base model `Qwen/Qwen2.5-7B`.
 
 ## Gate-check progress (roadmap §2.3)
 
@@ -33,6 +36,10 @@ it was met, the full numbers, and what the result means for later stages.
 4. **Voting leaves 4.7 pp on the table.** The correct answer is among the 32 samples for 98.0%
    of questions, but voting picks it for only 93.3%. This is the headroom E2.4's verifiers
    target.
+5. **Base models break answer extraction.** They keep writing after the answer and invent new
+   problems, so an extractor tuned on an instruction-tuned model silently scores the wrong
+   number. Read raw responses before trusting any new model's accuracy
+   ([E2.1-B](E2.1_base_model.md)).
 
 ## Files
 

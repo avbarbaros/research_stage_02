@@ -47,7 +47,7 @@ from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from reasoning_utils import (
-    select_subset, extract_gt, extract_pred, extract_first_number, is_correct,
+    select_subset, extract_gt, extract_pred, extract_first_number, canonical, is_correct,
     wilson_ci, paired_compare, run_self_tests,
 )
 
@@ -114,6 +114,14 @@ for _name in FEW_SHOT_CONDITIONS:
     _path = prompts[_name]["exemplars_file"]
     EXEMPLARS[_name] = load_exemplars(_path)
     print(f"Loaded {len(EXEMPLARS[_name])} exemplars for {_name} from {_path}")
+
+# Base-model direct condition: answer-only exemplars (Wei et al.'s standard prompting).
+DIRECT_EXEMPLARS: list[dict] = []
+if BASE:
+    DIRECT_EXEMPLARS = load_exemplars(base_cfg["direct"]["exemplars_file"])
+    for ex in DIRECT_EXEMPLARS:
+        if extract_pred(ex["answer"]) is None:
+            raise SystemExit(f"Direct exemplar has no final number: {ex['answer']!r}")
 
 # ---------------------------------------------------------------------------
 # Model
@@ -200,7 +208,10 @@ BUILDERS = [
 # ---------------------------------------------------------------------------
 
 def base_direct_prompt(q: str) -> str:
-    return f"Q: {q}\nA: {base_cfg['direct']['answer_prefix']}"
+    """Wei et al.'s standard prompting: exemplars with answers only, no reasoning."""
+    shots = "".join(f"Q: {ex['question']}\nA: The answer is {extract_pred(ex['answer'])}.\n\n"
+                    for ex in DIRECT_EXEMPLARS)
+    return shots + f"Q: {q}\nA:"
 
 
 def base_zscot_prompt(q: str) -> str:
@@ -287,11 +298,11 @@ def answer(cname: str, q: str, gen: dict) -> dict:
 
     # Base model: plain text.
     if cname == "direct":
-        # The prompt ends with "The answer (arabic numerals) is", so the first
-        # number in the completion is the answer.
+        # Answer-only exemplars end with "The answer is N.", so the trigger
+        # phrase applies.
         prompt_text = base_direct_prompt(q)
         response = generate(prompt_text, max_new, rep, STOP)
-        pred = extract_first_number(response)
+        pred = extract_pred(response)
 
     elif cname == "zero_shot_cot":
         # Kojima et al.'s two stages: (1) reasoning, (2) append the answer
@@ -303,6 +314,10 @@ def answer(cname: str, q: str, gen: dict) -> dict:
         final = generate(stage2, zs["answer_max_new_tokens"], rep, STOP)
         response = f"{reasoning}\n{zs['answer_trigger']} {final}"
         pred = extract_first_number(final)
+        # Check: the answer the reasoning itself states. A mismatch with the
+        # stage-2 answer means the extraction picked up something else.
+        return {"messages": None, "prompt_text": prompt_text, "response": response,
+                "pred": pred, "pred_stage1": extract_pred(reasoning)}
 
     else:
         # Few-shot: exemplars end with "The answer is N.", so the normal
@@ -361,6 +376,9 @@ for cond in CONDITIONS:
             "pred":         pred,                  # extracted numeric prediction
             "correct":      ok,
         })
+        if "pred_stage1" in res:                   # base zero-shot CoT only
+            records[-1]["pred_stage1"]    = res["pred_stage1"]
+            records[-1]["correct_stage1"] = is_correct(res["pred_stage1"], gt)
 
         elapsed = time.time() - t0
         speed   = (i + 1) / elapsed
@@ -384,7 +402,17 @@ for cond in CONDITIONS:
         "resp_len_median":     round(statistics.median(lengths), 1),
         "resp_len_max":        max(lengths),
     }
+    if records and "pred_stage1" in records[0]:
+        # Base zero-shot CoT: how often the Kojima stage-2 answer differs from
+        # the answer stated in the reasoning, and the accuracy of the latter.
+        meta["stage2_vs_stage1_mismatches"] = sum(
+            canonical(r["pred"]) != canonical(r["pred_stage1"]) for r in records)
+        meta["accuracy_stage1"] = round(
+            sum(r["correct_stage1"] for r in records) / len(records) * 100, 4)
     print(f"  DONE  acc={meta['accuracy']:.2f}%  extr_fail={n_exfail}  {elapsed:.0f}s")
+    if "stage2_vs_stage1_mismatches" in meta:
+        print(f"  stage-2 answer ≠ answer in reasoning: {meta['stage2_vs_stage1_mismatches']} "
+              f"questions  (accuracy from reasoning: {meta['accuracy_stage1']:.2f}%)")
 
     all_records[cname] = records
     summary[cname]     = meta

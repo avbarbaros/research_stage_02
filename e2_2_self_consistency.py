@@ -39,6 +39,15 @@ Usage
   python e2_2_self_consistency.py --n_eval 50
   python e2_2_self_consistency.py --greedy_ref outputs/e2_1_results_XXXX.json
   python e2_2_self_consistency.py --analyze_only outputs/e2_2_checkpoint.jsonl   # no GPU needed
+  python e2_2_self_consistency.py --model base \
+      --greedy_ref outputs/e2_1_results_XXXX_base.json                          # base-model run
+
+Base model (--model base)
+  Samples from models.base with the plain-text zero-shot CoT prompt of the E2.1
+  base-model run ("Q: ... A: Let's think step by step.", e2_1.base_prompts),
+  stopping at the stop strings there. The answer is the trigger phrase / last
+  number in each sample (no Kojima second stage, which would double the cost).
+  Uses its own checkpoint and results file (suffix "_base").
 """
 
 import json
@@ -67,6 +76,9 @@ parser.add_argument("--greedy_ref",   default=None, help="Override e2_2.greedy_r
 parser.add_argument("--fresh",        action="store_true", help="Delete the checkpoint and start over")
 parser.add_argument("--analyze_only", default=None, metavar="CHECKPOINT",
                     help="Skip generation; analyse an existing checkpoint JSONL")
+parser.add_argument("--model", default="main", choices=["main", "base"],
+                    help="'main' = instruction-tuned model with the chat template; "
+                         "'base' = models.base with plain-text prompts")
 args = parser.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -77,8 +89,13 @@ with open(args.config) as f:
 
 common   = cfg["common"]
 e22      = cfg["e2_2"]
-model_id = cfg["models"]["main"]
+model_id = cfg["models"][args.model]
 gen_cfg  = e22["generation"]
+
+BASE   = args.model == "base"
+SUFFIX = "_base" if BASE else ""                       # keeps base and Instruct files apart
+base_cfg = cfg["e2_1"]["base_prompts"]                 # shared with the E2.1 base-model run
+STOP     = base_cfg["stop_strings"] if BASE else None
 
 n_eval      = args.n_eval if args.n_eval is not None else e22["n_eval"]
 seed        = common["seed"]
@@ -98,7 +115,8 @@ else:
     drive_out_dir = None
 
 # Checkpoint lives on Drive when available: Colab's local disk is lost on disconnect.
-ckpt_path = (drive_out_dir or out_dir) / e22["checkpoint_file"]
+_ckpt = Path(e22["checkpoint_file"])
+ckpt_path = (drive_out_dir or out_dir) / f"{_ckpt.stem}{SUFFIX}{_ckpt.suffix}"
 
 run_self_tests()
 
@@ -117,6 +135,15 @@ RUN_HEADER = {
     "repetition_penalty": gen_cfg["repetition_penalty"],
     "max_new_tokens":     gen_cfg["max_new_tokens"],
 }
+if BASE:
+    # Only added for base runs, so existing Instruct checkpoints still resume.
+    RUN_HEADER.update({
+        "prompt_format":    "completion",
+        "system":           None,
+        "user_suffix":      None,
+        "reasoning_prefix": base_cfg["zero_shot_cot"]["reasoning_prefix"],
+        "stop_strings":     STOP,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -253,13 +280,22 @@ def analyse(records: list[dict]) -> dict:
     }
 
 
-def compare_with_greedy(records: list[dict], per_question: list[dict], ref_path: str) -> dict | None:
-    """Exact McNemar: E2.1 greedy zero-shot CoT vs. self-consistency at max k."""
+def compare_with_greedy(records: list[dict], per_question: list[dict], ref_path: str,
+                        records_model: str | None = None) -> dict | None:
+    """
+    Exact McNemar: E2.1 greedy zero-shot CoT vs. self-consistency at max k.
+    Both must come from the same model (records_model, default: this run's model).
+    """
     path = Path(ref_path)
     if not path.exists():
         print(f"  greedy_ref not found: {path} — skipping comparison")
         return None
     ref = json.loads(path.read_text())
+    sc_model = records_model or model_id
+    if ref.get("model") != sc_model:
+        print(f"  greedy_ref model ({ref.get('model')}) ≠ self-consistency model ({sc_model}) "
+              f"— skipping comparison: it would mix two models")
+        return None
     greedy = {r["question"]: r["correct"] for r in ref["records"].get("zero_shot_cot", [])}
     pairs = [(greedy[rec["question"]], pq["correct"])
              for rec, pq in zip(records, per_question) if rec["question"] in greedy]
@@ -324,7 +360,8 @@ def save_results(records: list[dict], res: dict, cmp: dict | None, header: dict)
         "vs_greedy":      cmp,
         "records":        records,
     }
-    filename = f"e2_2_results_{datetime.now().strftime('%Y%m%d_%H%M')}.json"
+    tag = "_base" if header.get("prompt_format") == "completion" else ""
+    filename = f"e2_2_results_{datetime.now().strftime('%Y%m%d_%H%M')}{tag}.json"
     text = json.dumps(output, indent=2)
     (out_dir / filename).write_text(text)
     print(f"\nResults saved → {out_dir / filename}")
@@ -344,7 +381,10 @@ if args.analyze_only:
     if header and header.get("seed") != seed:
         print(f"  Note: checkpoint seed {header.get('seed')} ≠ config seed {seed}")
     res = analyse(records)
-    cmp = compare_with_greedy(records, res["per_question"], greedy_ref) if greedy_ref else None
+    # Compare against the model that made the checkpoint, not the --model flag.
+    ckpt_model = (header or {}).get("model")
+    cmp = (compare_with_greedy(records, res["per_question"], greedy_ref, ckpt_model)
+           if greedy_ref else None)
     print_report(res, cmp)
     save_results(records, res, cmp, header or {})
     raise SystemExit(0)
@@ -362,7 +402,8 @@ dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.
 
 print(f"\n{'='*60}")
 print(f"E2.2  Self-consistency")
-print(f"Model : {model_id}")
+print(f"Model : {model_id}  ({'base, plain-text prompt' if BASE else 'chat template'})")
+print(f"Checkpoint file: {ckpt_path}")
 if torch.cuda.is_available():
     print(f"GPU   : {torch.cuda.get_device_name(0)}")
     print(f"VRAM  : {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
@@ -420,11 +461,15 @@ for i, r in done_by_index.items():
 # Sampling
 # ---------------------------------------------------------------------------
 
-def build_messages(q: str) -> list[dict]:
-    return [
+def build_prompt(q: str) -> str:
+    """Chat-template prompt (Instruct), or the plain-text E2.1 base zero-shot CoT prompt."""
+    if BASE:
+        return f"Q: {q}\nA: {base_cfg['zero_shot_cot']['reasoning_prefix']}"
+    messages = [
         {"role": "system", "content": e22["prompts"]["system"]},
         {"role": "user",   "content": q + e22["prompts"].get("user_suffix", "")},
     ]
+    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
 
 @torch.inference_mode()
@@ -445,12 +490,19 @@ def sample_answers(prompt_text: str, n: int) -> list[dict]:
             max_new_tokens=gen_cfg["max_new_tokens"],
             num_return_sequences=b,
             pad_token_id=PAD_ID,
+            **({"stop_strings": STOP, "tokenizer": tokenizer} if STOP else {}),
         )
         for seq in out[:, prompt_len:].tolist():
-            end = next((j for j, t in enumerate(seq) if t in EOS_IDS), None)
-            truncated = end is None
-            n_tokens  = len(seq) if truncated else end
-            text = tokenizer.decode(seq[:n_tokens], skip_special_tokens=True).strip()
+            # A sequence ends at EOS, or (base model) is padded after a stop string.
+            end = next((j for j, t in enumerate(seq) if t in EOS_IDS or t == PAD_ID), None)
+            text_full = tokenizer.decode(seq if end is None else seq[:end], skip_special_tokens=True)
+            text = text_full
+            for s in STOP or []:
+                text = text.split(s)[0]
+            stopped = text != text_full                    # cut at a stop string
+            truncated = end is None and not stopped
+            n_tokens  = len(seq) if end is None else end
+            text = text.strip()
             samples.append({
                 "response":  text,
                 "pred":      extract_pred(text),
@@ -474,8 +526,7 @@ for i, ex in enumerate(test_data):
     torch.manual_seed(seed + i)
 
     gt          = extract_gt(ex["answer"])
-    messages    = build_messages(ex["question"])
-    prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    prompt_text = build_prompt(ex["question"])
     tq          = time.time()
     samples     = sample_answers(prompt_text, max_k)
 

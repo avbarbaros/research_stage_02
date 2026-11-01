@@ -72,14 +72,18 @@ e2_1:
   # No system prompt. Few-shot conditions reuse the exemplar files above.
   base_prompts:
     direct:
-      answer_prefix: "The answer (arabic numerals) is"     # Kojima et al.'s zero-shot baseline
+      # Wei et al.'s "standard prompting": the same exemplars with the reasoning
+      # removed ("A: The answer is 6."). A base model ignores a one-line
+      # instruction to answer with a number; exemplars set the format.
+      exemplars_file: "few_shot_exemplars_wei.jsonl"
     zero_shot_cot:
       reasoning_prefix: "Let's think step by step."
       # Kojima et al.'s second stage: appended after the reasoning to get the answer.
       answer_trigger: "Therefore, the answer (arabic numerals) is"
       answer_max_new_tokens: 32
     # Generation stops here so the model does not invent the next question.
-    stop_strings: ["\nQ:"]
+    # Qwen2.5 base uses several formats for invented problems (run B1).
+    stop_strings: ["\nQ:", "\nQuestion:", "\n[Question]"]
 
   # ---- Generation (greedy) ----
   # Qwen2.5's generation_config.json adds repetition_penalty=1.05 unless
