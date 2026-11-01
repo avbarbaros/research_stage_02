@@ -40,6 +40,13 @@ def select_subset(examples: list, n_eval: int | None, seed: int) -> list:
 #   3. Multiple candidates  → trigger phrase wins; else last number in text
 #   4. Negative / decimal   → pattern includes '-' and '.'
 #   5. No number at all     → return None (counts as wrong, no crash)
+#   6. Lone comma           → a number must start with a digit; the old pattern
+#                             matched a bare "," and returned "" (fixed)
+#   7. Multi-part answers   → "The answer is 4 blue and 6 red" yields 4, not the
+#                             total; not handled, visible as minority votes in E2.2
+#   8. Base models continue → after answering they invent new problems; handled by
+#                             stop strings in the callers (e2_1.base_prompts)
+# See docs/E2.1_cot_from_scratch.md §5 for examples.
 # ---------------------------------------------------------------------------
 
 def extract_gt(raw: str) -> str:

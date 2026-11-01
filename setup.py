@@ -13,7 +13,6 @@ Run once at the start of each Colab session:
 import os
 import sys
 import json
-import shutil
 import argparse
 import subprocess
 from pathlib import Path
@@ -172,7 +171,7 @@ with open(config_path) as f:
 
 REQUIRED_TOP = ["common", "models", "e2_1", "e2_2", "e2_3", "e2_4"]
 REQUIRED_COMMON = ["seed", "device", "dtype", "output_dir"]
-REQUIRED_MODELS = ["main", "grpo_policy"]
+REQUIRED_MODELS = ["main", "base", "grpo_policy"]
 FEW_SHOT_CONDITIONS = ["few_shot_cot", "few_shot_cot_wei"]
 
 errors = []
@@ -207,6 +206,19 @@ if "e2_1" in cfg:
         elif not Path(pcfg["exemplars_file"]).exists():
             errors.append(f"e2_1.prompts.{p}.exemplars_file '{pcfg['exemplars_file']}' not found")
 
+    # Base-model prompts (--model base in E2.1 and E2.2)
+    bp = e21.get("base_prompts", {})
+    if not bp.get("stop_strings"):
+        errors.append("Missing e2_1.base_prompts.stop_strings")
+    direct_file = bp.get("direct", {}).get("exemplars_file")
+    if not direct_file:
+        errors.append("Missing e2_1.base_prompts.direct.exemplars_file")
+    elif not Path(direct_file).exists():
+        errors.append(f"e2_1.base_prompts.direct.exemplars_file '{direct_file}' not found")
+    for key in ["reasoning_prefix", "answer_trigger", "answer_max_new_tokens"]:
+        if key not in bp.get("zero_shot_cot", {}):
+            errors.append(f"Missing e2_1.base_prompts.zero_shot_cot.{key}")
+
 if errors:
     print()
     for e in errors:
@@ -215,6 +227,7 @@ if errors:
 
 ok(f"{config_path} is valid.")
 print(f"     model        : {cfg['models']['main']}")
+print(f"     base model   : {cfg['models']['base']}")
 print(f"     grpo_policy  : {cfg['models']['grpo_policy']}")
 print(f"     dtype        : {cfg['common']['dtype']}")
 print(f"     output_dir   : {cfg['common']['output_dir']}")
@@ -303,10 +316,14 @@ print("""
     python e2_1_cot_from_scratch.py               # all four conditions
     python e2_1_cot_from_scratch.py --n_eval 20   # quick smoke test
     python e2_2_self_consistency.py --n_eval 5    # E2.2 smoke test
+    python e2_1_cot_from_scratch.py --model base  # base-model run (Qwen2.5-7B)
+
+  Results write-ups are in docs/ (start with docs/README.md).
 
   Results will be written to:
     outputs/e2_1_results_<timestamp>.json
     outputs/e2_2_results_<timestamp>.json
+    (base-model runs add the suffix _base)
 
   To persist model weights across Colab sessions, mount Google Drive and run:
     python setup.py --hf_cache_dir /content/drive/MyDrive/hf_cache

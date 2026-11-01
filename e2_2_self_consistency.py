@@ -401,7 +401,7 @@ random.seed(seed)
 dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}[common["dtype"]]
 
 print(f"\n{'='*60}")
-print(f"E2.2  Self-consistency")
+print("E2.2  Self-consistency")
 print(f"Model : {model_id}  ({'base, plain-text prompt' if BASE else 'chat template'})")
 print(f"Checkpoint file: {ckpt_path}")
 if torch.cuda.is_available():

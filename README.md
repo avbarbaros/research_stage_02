@@ -6,6 +6,9 @@ Schedule: 12 Oct – 25 Oct 2026 | Hardware: single L4 GPU (Google Colab)
 This repository contains implementations for Stage 2 experiments: mastering the reasoning
 toolkit in its original text-only setting before porting ideas to the multimodal setting in Stage 3.
 
+**Results:** write-ups for every completed run, with the roadmap's success criteria, are in
+[docs/](docs/README.md).
+
 ---
 
 ## Repository structure
@@ -23,12 +26,17 @@ research_stage_02/
 ├── setup.py                     # installs packages, checks GPU, validates config.yaml
 │                                #        (scripts for E2.3–E2.4 to be added)
 │
+├── docs/                        # results write-ups (one page per run) + figures
+│
 └── outputs/                     # Created at runtime (also copied to drive_output_dir)
-    ├── e2_1_results_<timestamp>.json
-    ├── e2_2_checkpoint.jsonl              # in drive_output_dir when set
-    ├── e2_2_results_<timestamp>.json
-    └── e2_2_results_<timestamp>_scaling.png / .pdf / _table.md
+    ├── e2_1_results_<timestamp>[_base].json
+    ├── e2_2_checkpoint[_base].jsonl       # in drive_output_dir when set
+    ├── e2_2_results_<timestamp>[_base].json
+    └── e2_2_results_<timestamp>[_base]_scaling.png / .pdf / _table.md
 ```
+
+`_base` marks runs on the base model (`--model base`); see
+[Base-model ablation](#base-model-ablation---model-base).
 
 ---
 
@@ -47,7 +55,8 @@ GSM8K test questions**. That is what makes the paired comparisons between them v
 python setup.py
 ```
 
-This installs packages, checks the GPU, and validates `config.yaml` and both exemplar files.
+This installs packages, checks the GPU, and validates `config.yaml` (including the base-model
+prompts) and the exemplar files.
 
 ### Step 2 — Smoke tests (a few minutes)
 
@@ -67,16 +76,15 @@ conditions one at a time keeps each run short, and each run writes its own resul
 Run `zero_shot_cot` first, because E2.2 compares against it.
 
 ```bash
-python e2_1_cot_from_scratch.py --condition zero_shot_cot      # ~70 min  ← needed by E2.2
-python e2_1_cot_from_scratch.py --condition few_shot_cot       # ~40 min
-python e2_1_cot_from_scratch.py --condition few_shot_cot_wei   # ~40 min
+python e2_1_cot_from_scratch.py --condition zero_shot_cot      # ~77 min  ← needed by E2.2
+python e2_1_cot_from_scratch.py --condition few_shot_cot       # ~47 min
+python e2_1_cot_from_scratch.py --condition few_shot_cot_wei   # ~51 min
 python e2_1_cot_from_scratch.py --condition direct             # ~1 min
 ```
 
-The times are for 300 questions, estimated from the 20-question run (about 14 s per question
-for zero-shot CoT, 8 s for few-shot). You can also run everything at once (~2.5 h) with
-`python e2_1_cot_from_scratch.py`. The McNemar tests between conditions are only computed
-for conditions in the same run.
+The times are measured on an L4 for 300 questions. You can also run everything at once
+(~3 h) with `python e2_1_cot_from_scratch.py`. The McNemar tests between conditions are only
+computed for conditions in the same run, so a single run is preferable when the session allows.
 
 ### Step 4 — E2.2 (self-consistency)
 
@@ -119,10 +127,11 @@ file and prints the "clean scaling curve" checks. Plotting needs no GPU.
 |---|---------|-----|-------------|-----------|-------|
 | 1 | `python setup.py` | yes | 5–10 min | – | – |
 | 2 | smoke tests | yes | 5 min | – | 1 |
-| 3 | `e2_1 … --condition zero_shot_cot` | yes | ~70 min | no | 1 |
-| 3 | `e2_1 …` other three conditions | yes | ~80 min total | no | 1 |
-| 4 | `e2_2_self_consistency.py --greedy_ref …` | yes | ~2–3 h | **yes** | 3 (zero-shot file) |
+| 3 | `e2_1 … --condition zero_shot_cot` | yes | ~77 min | no | 1 |
+| 3 | `e2_1 …` other three conditions | yes | ~100 min total | no | 1 |
+| 4 | `e2_2_self_consistency.py --greedy_ref …` | yes | ~2–3 h (est.) | **yes** | 3 (zero-shot file) |
 | 5 | `plot_e2_2.py …` | no | seconds | – | 4 |
+| B | base-model runs (`--model base`, 100 questions) | yes | ~50 min E2.1 + ~30 min E2.2 | E2.2 only | 1 |
 
 ---
 
@@ -172,17 +181,17 @@ python e2_1_cot_from_scratch.py --n_eval 20
 # Override config without editing the file
 python e2_1_cot_from_scratch.py --n_eval 200 --condition few_shot_cot
 
-# Base-model ablation (Qwen2.5-7B without instruction tuning)
-python e2_1_cot_from_scratch.py --model base --n_eval 5     # smoke test: read the responses
-python e2_1_cot_from_scratch.py --model base                # all four conditions, one run
+# Base-model ablation (Qwen2.5-7B without instruction tuning), all four conditions in one run
+python e2_1_cot_from_scratch.py --model base --n_eval 100
 ```
 
 ### Base-model ablation (`--model base`)
 
 With the instruction-tuned model, zero-shot CoT matched few-shot CoT, unlike in the original
 papers (see [docs/E2.1_cot_from_scratch.md](docs/E2.1_cot_from_scratch.md)). This mode tests
-whether instruction tuning explains that, by running the same 300 questions on
-`models.base` (`Qwen/Qwen2.5-7B`).
+whether instruction tuning explains that, by running the same questions on `models.base`
+(`Qwen/Qwen2.5-7B`). The reported run used the first 100 questions
+([results](docs/E2.1_base_model.md)).
 
 A base model has no chat template, so prompts follow the original papers' plain-text format
 (settings in `e2_1.base_prompts`):
@@ -198,8 +207,8 @@ A base model has no chat template, so prompts follow the original papers' plain-
 - Zero-shot CoT also records the answer stated in the reasoning (`pred_stage1`). The summary
   counts how often it differs from the Kojima stage-2 answer; that number should be close to 0.
 - Results are saved as `e2_1_results_<timestamp>_base.json`, with `"prompt_format": "completion"`.
-- Run all four conditions **in one job** (~3 h) so the file includes the paired McNemar tests.
-  Runs have no checkpoint, so keep the Colab session active.
+- Run all four conditions **in one job** so the file includes the paired McNemar tests
+  (~50 min for 100 questions on an L4). Runs have no checkpoint, so keep the Colab session active.
 
 ### CLI arguments
 
@@ -252,14 +261,14 @@ Results are written to `outputs/e2_1_results_<timestamp>.json` (and copied to
   "model": "Qwen/Qwen2.5-7B-Instruct",
   "n_eval": 300,
   "summary": {
-    "direct":           {"accuracy": 72.40, "ci95_low": 68.3, "ci95_high": 76.1, "extraction_failures": 3, ...},
-    "zero_shot_cot":    {"accuracy": 84.20, "ci95_low": 80.7, "ci95_high": 87.2, ...},
-    "few_shot_cot":     {"accuracy": 86.60, ...},
-    "few_shot_cot_wei": {"accuracy": 85.80, ...}
+    "direct":           {"accuracy": 21.33, "ci95_low": 17.08, "ci95_high": 26.32, "extraction_failures": 0, ...},
+    "zero_shot_cot":    {"accuracy": 90.33, "ci95_low": 86.46, "ci95_high": 93.19, ...},
+    "few_shot_cot":     {"accuracy": 88.33, ...},
+    "few_shot_cot_wei": {"accuracy": 90.0, ...}
   },
   "comparisons": {
     "few_shot_cot_vs_zero_shot_cot": {
-      "a_only_correct": 14, "b_only_correct": 26, "diff_pp": 2.4, "mcnemar_p": 0.0807
+      "a_only_correct": ..., "b_only_correct": ..., "diff_pp": -2.0, "mcnemar_p": ...
     },
     ...
   },
@@ -281,6 +290,10 @@ Results are written to `outputs/e2_1_results_<timestamp>.json` (and copied to
 }
 ```
 
+The numbers are from the Instruct run (all conditions combined into one example). In
+`--model base` files, `messages` is `null`, `prompt_format` is `"completion"`, and zero-shot CoT
+records also carry `pred_stage1` / `correct_stage1`.
+
 ### Answer extraction pitfalls (documented)
 
 | # | Pitfall | Handled by |
@@ -290,6 +303,11 @@ Results are written to `outputs/e2_1_results_<timestamp>.json` (and copied to
 | 3 | Multiple number candidates | trigger-phrase match wins; last number is fallback |
 | 4 | Negative / decimal numbers | pattern includes `-` and `.` |
 | 5 | No number in output | returns `None`; counted as wrong, no crash |
+| 6 | Lone comma (`\boxed{52}, done`) | a number must start with a digit (the old pattern returned `""`) |
+| 7 | Multi-part answers (`4 blue and 6 red`) | not handled; first number is taken, voting hides it in E2.2 |
+| 8 | Base model continues with invented problems | stop strings in `e2_1.base_prompts`, plus the `pred_stage1` cross-check |
+
+Examples and their effect on the results: [docs/E2.1_cot_from_scratch.md §5](docs/E2.1_cot_from_scratch.md#5-answer-extraction-pitfalls).
 
 ---
 
@@ -384,9 +402,9 @@ order doesn't depend on `n_eval`.
 
 | ID | Script | Status |
 |----|--------|--------|
-| E2.1 | `e2_1_cot_from_scratch.py` | Ready |
-| E2.2 | `e2_2_self_consistency.py` | Ready |
-| E2.3 | `e2_3_grpo_by_hand.py` | Planned |
+| E2.1 | `e2_1_cot_from_scratch.py` | Done: Instruct + base model ([results](docs/E2.1_cot_from_scratch.md)) |
+| E2.2 | `e2_2_self_consistency.py` | Done: Instruct + base model ([results](docs/E2.2_self_consistency.md)) |
+| E2.3 | `e2_3_grpo_by_hand.py` | Next |
 | E2.4 | `e2_4_verifier_study.py` | Planned |
 
 All experiments share `config.yaml` and write results to `outputs/`.

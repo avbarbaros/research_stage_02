@@ -82,7 +82,7 @@ e2_1:
       answer_trigger: "Therefore, the answer (arabic numerals) is"
       answer_max_new_tokens: 32
     # Generation stops here so the model does not invent the next question.
-    # Qwen2.5 base uses several formats for invented problems (run B1).
+    # A base model may continue with invented problems in several formats.
     stop_strings: ["\nQ:", "\nQuestion:", "\n[Question]"]
 
   # ---- Generation (greedy) ----
@@ -163,9 +163,17 @@ e2_3:
     clip_eps: 0.2
     max_grad_norm: 1.0
 
+  # Dr. GRPO (Liu et al., 2025, arXiv:2503.20783) removes two biases in the GRPO
+  # objective; it does not add a length penalty.
+  #   - length bias: GRPO divides each response's token loss by its own length
+  #     |o_i|, which favours long wrong answers and short right ones. Dr. GRPO
+  #     sums over tokens and divides by a constant (here max_new_tokens).
+  #   - difficulty bias: GRPO divides the advantage by the group's reward std.
+  #     Dr. GRPO uses A_i = r_i - mean(r_group) only.
   dr_grpo:
     enabled: true
-    length_penalty_coef: 0.001
+    normalize_by_length: false   # true = original GRPO (divide by |o_i|)
+    scale_by_std: false          # true = original GRPO (divide by std of group rewards)
 
 # ---------------------------------------------------------------------------
 # E2.4 — Verifier study

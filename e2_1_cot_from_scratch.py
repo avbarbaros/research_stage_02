@@ -127,7 +127,7 @@ if BASE:
 # Model
 # ---------------------------------------------------------------------------
 print(f"\n{'='*60}")
-print(f"E2.1  CoT from Scratch")
+print("E2.1  CoT from Scratch")
 print(f"Model : {model_id}  ({'base, plain-text prompts' if BASE else 'chat template'})")
 if torch.cuda.is_available():
     print(f"GPU   : {torch.cuda.get_device_name(0)}")
@@ -334,10 +334,8 @@ def answer(cname: str, q: str, gen: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 CONDITIONS = [
-    {"name":       name,
-     "build":      fn,
-     "gen":        gen_cfg["direct" if name == "direct" else "cot"]}
-    for name, fn in BUILDERS
+    {"name": name, "gen": gen_cfg["direct" if name == "direct" else "cot"]}
+    for name, _ in BUILDERS
 ]
 if args.condition != "all":
     CONDITIONS = [c for c in CONDITIONS if c["name"] == args.condition]
