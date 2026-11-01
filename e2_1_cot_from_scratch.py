@@ -20,10 +20,17 @@ with an exact McNemar test on the paired per-question outcomes.
 Dependencies:
   pip install transformers datasets accelerate pyyaml
 
+Base-model ablation (--model base):
+  Runs the same conditions on models.base (Qwen2.5-7B, no instruction tuning).
+  A base model has no chat template, so prompts are plain "Q: ... A:" text as in
+  the original papers, generation stops at the next "Q:", and zero-shot CoT uses
+  Kojima et al.'s two-stage answer extraction. See e2_1.base_prompts in config.yaml.
+
 Usage:
   python e2_1_cot_from_scratch.py
   python e2_1_cot_from_scratch.py --condition direct
   python e2_1_cot_from_scratch.py --n_eval 100
+  python e2_1_cot_from_scratch.py --model base
 """
 
 import json
@@ -40,7 +47,7 @@ from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from reasoning_utils import (
-    select_subset, extract_gt, extract_pred, is_correct,
+    select_subset, extract_gt, extract_pred, extract_first_number, is_correct,
     wilson_ci, paired_compare, run_self_tests,
 )
 
@@ -52,6 +59,9 @@ parser.add_argument("--config",    default="config.yaml")
 parser.add_argument("--n_eval",    type=int, default=None, help="Override e2_1.n_eval")
 parser.add_argument("--condition", default="all",
                     choices=["all", "direct", "zero_shot_cot", "few_shot_cot", "few_shot_cot_wei"])
+parser.add_argument("--model", default="main", choices=["main", "base"],
+                    help="'main' = instruction-tuned model with chat prompts; "
+                         "'base' = models.base with plain-text Q/A prompts")
 args = parser.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -62,9 +72,13 @@ with open(args.config) as f:
 
 common   = cfg["common"]
 e21      = cfg["e2_1"]
-model_id = cfg["models"]["main"]
+model_id = cfg["models"][args.model]
 prompts  = e21["prompts"]
 gen_cfg  = e21["generation"]
+
+BASE        = args.model == "base"        # plain-text prompts instead of the chat template
+base_cfg    = e21["base_prompts"]
+STOP        = base_cfg["stop_strings"] if BASE else None
 
 n_eval  = args.n_eval if args.n_eval is not None else e21["n_eval"]
 seed    = common["seed"]
@@ -106,7 +120,7 @@ for _name in FEW_SHOT_CONDITIONS:
 # ---------------------------------------------------------------------------
 print(f"\n{'='*60}")
 print(f"E2.1  CoT from Scratch")
-print(f"Model : {model_id}")
+print(f"Model : {model_id}  ({'base, plain-text prompts' if BASE else 'chat template'})")
 if torch.cuda.is_available():
     print(f"GPU   : {torch.cuda.get_device_name(0)}")
     print(f"VRAM  : {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
@@ -180,31 +194,65 @@ BUILDERS = [
     ("few_shot_cot_wei", build_fscot_wei),
 ]
 
+# ---------------------------------------------------------------------------
+# Plain-text prompts for the base model (--model base)
+# Format follows Wei et al. / Kojima et al.: "Q: <question>\nA: <answer>"
+# ---------------------------------------------------------------------------
+
+def base_direct_prompt(q: str) -> str:
+    return f"Q: {q}\nA: {base_cfg['direct']['answer_prefix']}"
+
+
+def base_zscot_prompt(q: str) -> str:
+    return f"Q: {q}\nA: {base_cfg['zero_shot_cot']['reasoning_prefix']}"
+
+
+def base_fscot_prompt(cname: str, q: str) -> str:
+    shots = "".join(f"Q: {ex['question']}\nA: {ex['answer']}\n\n" for ex in EXEMPLARS[cname])
+    return shots + f"Q: {q}\nA:"
+
+
+def render_chat(messages: list[dict]) -> str:
+    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+
+def preview_prompt(cname: str, q: str) -> str:
+    """The (first) prompt text sent to the model for this condition."""
+    if not BASE:
+        return render_chat(dict(BUILDERS)[cname](q))
+    if cname == "direct":
+        return base_direct_prompt(q)
+    if cname == "zero_shot_cot":
+        return base_zscot_prompt(q)
+    return base_fscot_prompt(cname, q)
+
+
 # Print prompt token counts once for transparency
 sample_q = test_data[0]["question"]
 print("\nPrompt token counts (sample question):")
-for name, fn in BUILDERS:
-    t = tokenizer.apply_chat_template(fn(sample_q), tokenize=False, add_generation_prompt=True)
-    print(f"  {name:<16}: {len(tokenizer.encode(t)):,} tokens")
+for name, _ in BUILDERS:
+    print(f"  {name:<16}: {len(tokenizer.encode(preview_prompt(name, sample_q))):,} tokens")
 
 # ---------------------------------------------------------------------------
 # Inference
 # ---------------------------------------------------------------------------
 
 @torch.inference_mode()
-def generate(messages: list[dict], max_new_tokens: int, repetition_penalty: float) -> tuple[str, str]:
+def generate(prompt_text: str, max_new_tokens: int, repetition_penalty: float,
+             stop_strings: list[str] | None = None) -> str:
     """
-    Greedy decoding. Returns (prompt_text, response_text), both stored verbatim.
+    Greedy decoding of an already-rendered prompt. Returns the response text.
 
     Qwen2.5's generation_config.json sets do_sample/temperature/top_p/top_k and
     repetition_penalty=1.05, which generate() applies unless overridden. All of
     them are set explicitly here so decoding is plain greedy.
+
+    stop_strings (base model only) end generation at e.g. the next "Q:", and are
+    cut from the returned text.
     """
-    prompt_text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
     inputs = tokenizer(prompt_text, return_tensors="pt").to(model.device)
     prompt_len = inputs["input_ids"].shape[1]
+    stop_kwargs = {"stop_strings": stop_strings, "tokenizer": tokenizer} if stop_strings else {}
     out = model.generate(
         **inputs,
         max_new_tokens=max_new_tokens,
@@ -214,9 +262,56 @@ def generate(messages: list[dict], max_new_tokens: int, repetition_penalty: floa
         top_k=None,
         repetition_penalty=repetition_penalty,
         pad_token_id=tokenizer.eos_token_id,
+        **stop_kwargs,
     )
-    response_text = tokenizer.decode(out[0][prompt_len:], skip_special_tokens=True).strip()
-    return prompt_text, response_text
+    text = tokenizer.decode(out[0][prompt_len:], skip_special_tokens=True)
+    for s in stop_strings or []:
+        text = text.split(s)[0]
+    return text.strip()
+
+
+def answer(cname: str, q: str, gen: dict) -> dict:
+    """
+    Run one condition on one question. Returns the fields stored per record:
+    messages (chat mode only), prompt_text, response, pred.
+    """
+    max_new, rep = gen["max_new_tokens"], gen["repetition_penalty"]
+
+    # Instruction-tuned model: chat template, extract from the whole response.
+    if not BASE:
+        messages = dict(BUILDERS)[cname](q)
+        prompt_text = render_chat(messages)
+        response = generate(prompt_text, max_new, rep)
+        return {"messages": messages, "prompt_text": prompt_text,
+                "response": response, "pred": extract_pred(response)}
+
+    # Base model: plain text.
+    if cname == "direct":
+        # The prompt ends with "The answer (arabic numerals) is", so the first
+        # number in the completion is the answer.
+        prompt_text = base_direct_prompt(q)
+        response = generate(prompt_text, max_new, rep, STOP)
+        pred = extract_first_number(response)
+
+    elif cname == "zero_shot_cot":
+        # Kojima et al.'s two stages: (1) reasoning, (2) append the answer
+        # trigger after the reasoning and read the first number that follows.
+        zs = base_cfg["zero_shot_cot"]
+        prompt_text = base_zscot_prompt(q)
+        reasoning = generate(prompt_text, max_new, rep, STOP)
+        stage2 = f"{prompt_text} {reasoning}\n{zs['answer_trigger']}"
+        final = generate(stage2, zs["answer_max_new_tokens"], rep, STOP)
+        response = f"{reasoning}\n{zs['answer_trigger']} {final}"
+        pred = extract_first_number(final)
+
+    else:
+        # Few-shot: exemplars end with "The answer is N.", so the normal
+        # trigger-phrase extraction applies.
+        prompt_text = base_fscot_prompt(cname, q)
+        response = generate(prompt_text, max_new, rep, STOP)
+        pred = extract_pred(response)
+
+    return {"messages": None, "prompt_text": prompt_text, "response": response, "pred": pred}
 
 
 # ---------------------------------------------------------------------------
@@ -245,12 +340,10 @@ for cond in CONDITIONS:
     t0       = time.time()
 
     for i, ex in enumerate(test_data):
-        gt                   = extract_gt(ex["answer"])
-        messages             = cond["build"](ex["question"])
-        prompt_text, response = generate(messages, cond["gen"]["max_new_tokens"],
-                                         cond["gen"]["repetition_penalty"])
-        pred                 = extract_pred(response)
-        ok                   = is_correct(pred, gt)
+        gt   = extract_gt(ex["answer"])
+        res  = answer(cname, ex["question"], cond["gen"])
+        pred = res["pred"]
+        ok   = is_correct(pred, gt)
 
         if pred is None:
             n_exfail += 1
@@ -262,9 +355,9 @@ for cond in CONDITIONS:
             "question":     ex["question"],
             "gt_raw":       ex["answer"],          # full GSM8K answer with steps + ####
             "gt":           gt,                    # extracted integer string
-            "messages":     messages,              # full chat turns sent to model
-            "prompt_text":  prompt_text,           # rendered prompt (after chat template)
-            "response":     response,              # model output verbatim
+            "messages":     res["messages"],       # chat turns sent to model (None for base)
+            "prompt_text":  res["prompt_text"],    # rendered prompt (first stage for base zero-shot CoT)
+            "response":     res["response"],       # model output verbatim
             "pred":         pred,                  # extracted numeric prediction
             "correct":      ok,
         })
@@ -364,15 +457,17 @@ if "zero_shot_cot" in all_records and "few_shot_cot_wei" in all_records:
 output = {
     "experiment": "E2.1",
     "model":      model_id,
+    "prompt_format": "completion" if BASE else "chat",
     "n_eval":     len(test_data),
     "seed":       seed,
     "generation": gen_cfg,
+    **({"base_prompts": base_cfg} if BASE else {}),
     "summary":    summary,
     "comparisons": comparisons,
     "records":    all_records,
 }
 ts = datetime.now().strftime("%Y%m%d_%H%M")
-filename = f"e2_1_results_{ts}.json"
+filename = f"e2_1_results_{ts}{'_base' if BASE else ''}.json"
 
 out_path = out_dir / filename
 out_path.write_text(json.dumps(output, indent=2))

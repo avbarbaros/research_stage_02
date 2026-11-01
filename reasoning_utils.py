@@ -79,6 +79,16 @@ def extract_pred(text: str) -> str | None:
     return None
 
 
+def extract_first_number(text: str) -> str | None:
+    """
+    First number in the text. Used for answer-only completions from a base model
+    (Kojima et al.'s "answer cleansing"): the answer comes first, and anything the
+    model writes after it is noise.
+    """
+    m = re.search(r"-?\d[\d,]*(?:\.\d+)?", text)
+    return m.group(0).replace(",", "").strip() if m else None
+
+
 def canonical(pred: str | None) -> str | None:
     """
     Canonical form for comparing / voting on answers: "18", "18.0", "018" → "18".

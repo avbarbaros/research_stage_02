@@ -171,7 +171,33 @@ python e2_1_cot_from_scratch.py --n_eval 20
 
 # Override config without editing the file
 python e2_1_cot_from_scratch.py --n_eval 200 --condition few_shot_cot
+
+# Base-model ablation (Qwen2.5-7B without instruction tuning)
+python e2_1_cot_from_scratch.py --model base --n_eval 5     # smoke test: read the responses
+python e2_1_cot_from_scratch.py --model base                # all four conditions, one run
 ```
+
+### Base-model ablation (`--model base`)
+
+With the instruction-tuned model, zero-shot CoT matched few-shot CoT, unlike in the original
+papers (see [docs/E2.1_cot_from_scratch.md](docs/E2.1_cot_from_scratch.md)). This mode tests
+whether instruction tuning explains that, by running the same 300 questions on
+`models.base` (`Qwen/Qwen2.5-7B`).
+
+A base model has no chat template, so prompts follow the original papers' plain-text format
+(settings in `e2_1.base_prompts`):
+
+| Condition | Prompt | Answer taken from |
+|-----------|--------|-------------------|
+| `direct` | `Q: {question}\nA: The answer (arabic numerals) is` | first number in the completion |
+| `zero_shot_cot` | Stage 1: `Q: {question}\nA: Let's think step by step.` · Stage 2: stage 1 + reasoning + `\nTherefore, the answer (arabic numerals) is` (Kojima et al.) | first number after the stage-2 trigger |
+| `few_shot_cot`, `few_shot_cot_wei` | the same exemplar files as `Q: …\nA: …` blocks, then `Q: {question}\nA:` | usual trigger / last-number extraction |
+
+- There is no system prompt, and generation stops at the next `\nQ:` so the model does not
+  invent new questions.
+- Results are saved as `e2_1_results_<timestamp>_base.json`, with `"prompt_format": "completion"`.
+- Run all four conditions **in one job** (~3 h) so the file includes the paired McNemar tests.
+  Runs have no checkpoint, so keep the Colab session active.
 
 ### CLI arguments
 
@@ -180,6 +206,7 @@ python e2_1_cot_from_scratch.py --n_eval 200 --condition few_shot_cot
 | `--config` | `config.yaml` | Path to config file |
 | `--condition` | `all` | `all` / `direct` / `zero_shot_cot` / `few_shot_cot` / `few_shot_cot_wei` |
 | `--n_eval` | value from config | Number of GSM8K test examples to use |
+| `--model` | `main` | `main` = `models.main` with the chat template; `base` = `models.base` with plain-text prompts |
 
 ### Configuration
 
@@ -198,6 +225,8 @@ All knobs live in `config.yaml` under the `e2_1` section — no code edits neede
 | `e2_1.generation.cot.max_new_tokens` | 512 | Token budget for CoT conditions |
 | `e2_1.generation.*.repetition_penalty` | 1.0 | Overrides Qwen's hidden default of 1.05, so decoding is plain greedy |
 | `models.main` | `Qwen/Qwen2.5-7B-Instruct` | Inference model |
+| `models.base` | `Qwen/Qwen2.5-7B` | Model for `--model base` |
+| `e2_1.base_prompts.*` | see file | Plain-text prompt pieces and stop strings for `--model base` |
 
 ### Few-shot exemplars
 

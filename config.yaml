@@ -18,6 +18,7 @@ common:
 # ---------------------------------------------------------------------------
 models:
   main: "Qwen/Qwen2.5-7B-Instruct"
+  base: "Qwen/Qwen2.5-7B"                       # E2.1 ablation: same model without instruction tuning
   grpo_policy: "Qwen/Qwen2.5-1.5B-Instruct"   # E2.3: small model for GRPO
   outcome_rm: ""                                # E2.4: leave blank to train from scratch
   process_rm: ""
@@ -64,6 +65,21 @@ e2_1:
         You are a math assistant.
         Solve each problem step by step and end with 'The answer is <number>.'
       exemplars_file: "few_shot_exemplars_wei.jsonl"
+
+  # ---- Base-model prompts (used with --model base) ----
+  # A base model has no chat template, so prompts are plain text in the
+  # "Q: ... A: ..." format of Wei et al. (2022) and Kojima et al. (2022).
+  # No system prompt. Few-shot conditions reuse the exemplar files above.
+  base_prompts:
+    direct:
+      answer_prefix: "The answer (arabic numerals) is"     # Kojima et al.'s zero-shot baseline
+    zero_shot_cot:
+      reasoning_prefix: "Let's think step by step."
+      # Kojima et al.'s second stage: appended after the reasoning to get the answer.
+      answer_trigger: "Therefore, the answer (arabic numerals) is"
+      answer_max_new_tokens: 32
+    # Generation stops here so the model does not invent the next question.
+    stop_strings: ["\nQ:"]
 
   # ---- Generation (greedy) ----
   # Qwen2.5's generation_config.json adds repetition_penalty=1.05 unless
