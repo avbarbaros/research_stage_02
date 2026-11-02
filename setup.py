@@ -89,6 +89,17 @@ for pkg in PACKAGES:
     except subprocess.CalledProcessError as e:
         fail(f"Failed to install {pkg}:\n{e.stderr}")
 
+# Colab preinstalls torchao 0.10. Recent peft raises ImportError for torchao < 0.16
+# while attaching LoRA layers (E2.3), even though nothing here uses torchao.
+from importlib.metadata import version, PackageNotFoundError
+try:
+    tao = version("torchao")
+    if tuple(int(x) for x in tao.split(".")[:2]) < (0, 16):
+        run([sys.executable, "-m", "pip", "uninstall", "-y", "-q", "torchao"])
+        ok(f"Removed torchao {tao} (incompatible with peft; not used by these experiments)")
+except PackageNotFoundError:
+    pass
+
 # ---------------------------------------------------------------------------
 # 3. Verify torch + CUDA
 # ---------------------------------------------------------------------------
