@@ -440,7 +440,7 @@ bias is visible in your own logs.
 # Smoke test (a few minutes): check the log prints sensible rewards and lengths
 python e2_3_grpo_by_hand.py --variant grpo --steps 3
 
-# The two runs (~40–60 min each on an L4, estimated; same seed, same prompts per step)
+# The two runs (~1 h 45 min each on an L4: ~30 s per step; same seed, same prompts per step)
 python e2_3_grpo_by_hand.py --variant grpo
 python e2_3_grpo_by_hand.py --variant dr_grpo
 

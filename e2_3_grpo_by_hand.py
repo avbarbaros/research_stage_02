@@ -205,7 +205,9 @@ def log(row: dict) -> None:
 
 order = list(range(len(train_set)))
 random.Random(seed).shuffle(order)
-log({"step": 0, **evaluate()})
+ev0 = evaluate()
+log({"step": 0, **ev0})
+print(f"[{args.variant}] step 0  eval acc {ev0['eval_reward']:.3f}  len {ev0['eval_len']:.1f}", flush=True)
 t0 = time.time()
 for step in range(1, STEPS + 1):
     batch = [train_set[order[((step - 1) * B + j) % len(order)]] for j in range(B)]   # cycles epochs
