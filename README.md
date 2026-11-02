@@ -440,7 +440,7 @@ bias is visible in your own logs.
 # Smoke test (a few minutes): check the log prints sensible rewards and lengths
 python e2_3_grpo_by_hand.py --variant grpo --steps 3
 
-# The two runs (~1 h 45 min each on an L4: ~30 s per step; same seed, same prompts per step)
+# The two runs (~2 h each on an L4: ~32 s per step plus evaluations; same seed, same prompts per step)
 python e2_3_grpo_by_hand.py --variant grpo
 python e2_3_grpo_by_hand.py --variant dr_grpo
 
@@ -461,7 +461,7 @@ the update identical). If the length difference is still small after 200 steps, 
 |----|--------|--------|
 | E2.1 | `e2_1_cot_from_scratch.py` | Done: Instruct + base model ([results](docs/E2.1_cot_from_scratch.md)) |
 | E2.2 | `e2_2_self_consistency.py` | Done: Instruct + base model ([results](docs/E2.2_self_consistency.md)) |
-| E2.3 | `e2_3_grpo_by_hand.py` | Implemented, ready to run |
+| E2.3 | `e2_3_grpo_by_hand.py` | Done: GRPO + Dr. GRPO ([results](docs/E2.3_grpo_results.md)) |
 | E2.4 | `e2_4_verifier_study.py` | Planned |
 
 All experiments share `config.yaml` and write results to `outputs/`.
