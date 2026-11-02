@@ -10,7 +10,7 @@ it was met, the full numbers, and what the result means for later stages.
 | [E2.2 — Self-consistency](E2.2_self_consistency.md) | A clean scaling curve, with the marginal accuracy per unit of compute stated | 89.1% (k=1) → 93.3% (k=32), saturating by k≈16. +3.0 pp over greedy (McNemar p = 0.023). 0.85 pp per extra sample at small k, ~0.004 pp at k=16–32 | ✅ |
 | [E2.1-B — CoT on the base model](E2.1_base_model.md) | Ablation: does the papers' few-shot > zero-shot ordering appear without instruction tuning? | 100 q: direct 28% ≪ zero-shot 82% ≈ few-shot 79–85% (p = 0.61). Same ordering as Instruct; Qwen2.5 "base" likely already saw instruction-style math data | ✅ |
 | [E2.2-B — Self-consistency on the base model](E2.2_base_model.md) | Ablation: SC gains for a weaker single-chain model | 100 q: 74.8% (k=1) → 91.0% (k=32), +9.0 pp over greedy (p = 0.023). Gains ~4× the Instruct run; selection gap 8.0 pp | ✅ |
-| E2.3 — GRPO by hand | Training reward increases; length bias shown in own logs | — | ☐ |
+| E2.3 — GRPO by hand ([implementation](E2.3_grpo_implementation.md)) | Training reward increases; length bias shown in own logs | Implemented; smoke test OK (reward 0.45–0.67 in the first steps). Full GRPO and Dr. GRPO runs pending | ⏳ |
 | E2.4 — Verifier study | Process supervision beats outcome supervision at matched n | — | ☐ |
 
 **Common setup:** `Qwen/Qwen2.5-7B-Instruct`, GSM8K test split, the same 300 questions
