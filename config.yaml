@@ -143,37 +143,57 @@ e2_2:
 # E2.3 — GRPO by hand
 # ---------------------------------------------------------------------------
 e2_3:
-  task: "arithmetic"           # "arithmetic" | "string_manipulation"
-  n_train: 2000
-  n_eval: 200
+  # Toy verifiable task: integer arithmetic such as "Compute: 37 * 14 - 85 * 6 + 9".
+  # Generated, so the reward (exact answer match) is always verifiable. Hard enough
+  # that the model starts well below 100% — RL needs room to improve.
+  task:
+    n_operands: 4
+    max_operand: 99
+    ops: ["+", "-", "*"]
+  n_train: 2000                # training problems (seed), disjoint from eval
+  n_eval: 200                  # held-out problems, greedy decoding
 
   prompts:
     system: >-
-      You are a math assistant. Solve the arithmetic problem.
-      Output your reasoning then state the answer as: 'The answer is <number>.'
+      You are a math assistant. Solve the arithmetic problem step by step,
+      then state the answer as: 'The answer is <number>.'
+
+  # LoRA instead of full fine-tuning: fits an L4 (24 GB), and the frozen reference
+  # model for the KL term is the same network with the adapter switched off.
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.0
+    target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
   grpo:
-    group_size: 8
-    lr: 1.0e-5
-    epochs: 3
-    batch_size: 4
-    max_new_tokens: 128
-    temperature: 0.9
-    kl_coef: 0.01
+    steps: 200                 # one step = prompts_per_step prompts × group_size samples
+    prompts_per_step: 8
+    group_size: 8              # G: samples per prompt; advantages are relative within a group
+    micro_batch_size: 8        # sequences per forward/backward (gradient accumulation); lower on OOM
+    lr: 2.0e-5
+    max_new_tokens: 256        # also the constant normaliser in Dr. GRPO
+    temperature: 0.9           # top_p 1.0, top_k off, repetition_penalty 1.0 (set in code)
+    kl_coef: 0.01              # β, k3 estimator against the adapter-free model
     clip_eps: 0.2
+    ppo_epochs: 1              # μ: updates per batch of rollouts (1 = on-policy, ratio ≡ 1)
     max_grad_norm: 1.0
+    eval_every: 25             # steps between greedy evaluations on the held-out set
+    eval_batch_size: 64
+    gradient_checkpointing: true
 
-  # Dr. GRPO (Liu et al., 2025, arXiv:2503.20783) removes two biases in the GRPO
-  # objective; it does not add a length penalty.
-  #   - length bias: GRPO divides each response's token loss by its own length
-  #     |o_i|, which favours long wrong answers and short right ones. Dr. GRPO
-  #     sums over tokens and divides by a constant (here max_new_tokens).
-  #   - difficulty bias: GRPO divides the advantage by the group's reward std.
-  #     Dr. GRPO uses A_i = r_i - mean(r_group) only.
-  dr_grpo:
-    enabled: true
-    normalize_by_length: false   # true = original GRPO (divide by |o_i|)
-    scale_by_std: false          # true = original GRPO (divide by std of group rewards)
+  # The two variants differ only in these switches (Dr. GRPO: Liu et al., 2025,
+  # arXiv:2503.20783). Dr. GRPO removes two biases; it does not add a length penalty.
+  #   normalize_by_length — GRPO divides each response's summed token loss by its own
+  #     length |o_i|. A wrong (negative-advantage) response is then penalised less per
+  #     token the longer it is, and a right one rewarded more the shorter it is.
+  #     Dr. GRPO divides by a constant (max_new_tokens) instead.
+  #   scale_by_std — GRPO divides the advantage by the std of the group's rewards,
+  #     which up-weights groups that are almost all right or all wrong.
+  #     Dr. GRPO uses A_i = r_i − mean(r_group).
+  variants:
+    grpo:    {normalize_by_length: true,  scale_by_std: true}
+    dr_grpo: {normalize_by_length: false, scale_by_std: false}
 
 # ---------------------------------------------------------------------------
 # E2.4 — Verifier study

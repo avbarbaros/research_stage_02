@@ -23,8 +23,10 @@ research_stage_02/
 ├── e2_1_cot_from_scratch.py     # E2.1 — direct / zero-shot CoT / two few-shot CoT variants
 ├── e2_2_self_consistency.py     # E2.2 — self-consistency (majority voting over sampled CoT)
 ├── plot_e2_2.py                 # E2.2 — scaling-curve figure + table from the results JSON
+├── e2_3_grpo_by_hand.py         # E2.3 — GRPO / Dr. GRPO on a toy arithmetic task (LoRA)
+├── plot_e2_3.py                 # E2.3 — GRPO vs. Dr. GRPO comparison figure + table
 ├── setup.py                     # installs packages, checks GPU, validates config.yaml
-│                                #        (scripts for E2.3–E2.4 to be added)
+│                                #        (script for E2.4 to be added)
 │
 ├── docs/                        # results write-ups (one page per run) + figures
 │
@@ -32,7 +34,10 @@ research_stage_02/
     ├── e2_1_results_<timestamp>[_base].json
     ├── e2_2_checkpoint[_base].jsonl       # in drive_output_dir when set
     ├── e2_2_results_<timestamp>[_base].json
-    └── e2_2_results_<timestamp>[_base]_scaling.png / .pdf / _table.md
+    ├── e2_2_results_<timestamp>[_base]_scaling.png / .pdf / _table.md
+    ├── e2_3_<variant>_<timestamp>_log.jsonl   # one row per step (in drive_output_dir when set)
+    ├── e2_3_<variant>_<timestamp>_adapter/    # trained LoRA adapter
+    └── e2_3_compare_<timestamp>.png / .pdf / .md
 ```
 
 `_base` marks runs on the base model (`--model base`); see
@@ -398,13 +403,65 @@ order doesn't depend on `n_eval`.
 
 ---
 
+## E2.3 — GRPO by hand
+
+**Goal:** implement GRPO in under 200 lines on a toy verifiable task, then repeat with the
+Dr. GRPO correction. Success criterion (roadmap): training reward increases, and the length
+bias is visible in your own logs.
+
+**Papers:** Shao et al. (2024) arXiv:2402.03300 (GRPO) · Liu et al. (2025) arXiv:2503.20783 (Dr. GRPO)
+
+### How it works
+
+- **Task:** generated integer arithmetic, e.g. `Compute: 37 * 14 - 85 * 6 + 9` (4 operands
+  ≤ 99, `+ - *`). 2,000 training and 200 held-out problems, disjoint. Reward = 1 if the
+  extracted answer is exactly right, else 0.
+- **Policy:** `Qwen2.5-1.5B-Instruct` + LoRA (r = 16, all projection layers). The reference
+  model for the KL term is the same network with the adapter disabled, so it costs no memory.
+- **Step:** 8 prompts × G = 8 samples (T = 0.9, top_p 1.0, top_k off, ≤ 256 tokens) → rewards →
+  group-relative advantages → one clipped policy-gradient update with a k3 KL penalty (β = 0.01).
+- **Variants** (`e2_3.variants`), identical except for two switches:
+
+| | Advantage | Per-response normalisation |
+|---|---|---|
+| `grpo` | (r − mean) / std of the group | divide by the response's own length \|o_i\| |
+| `dr_grpo` | r − mean | divide by a constant (`max_new_tokens`) |
+
+  Under GRPO, a wrong response is penalised less per token the longer it is, so wrong answers
+  are expected to grow longer over training. That is the length bias the experiment looks for.
+- **Logged every step:** reward, response length of correct vs. incorrect samples, truncation
+  rate, share of groups with all-equal rewards (no learning signal), KL, loss, gradient norm.
+  Greedy held-out accuracy every 25 steps. The log is written line by line, so a disconnect
+  keeps everything up to the last step (training itself does not resume).
+
+### Run
+
+```bash
+# Smoke test (a few minutes): check the log prints sensible rewards and lengths
+python e2_3_grpo_by_hand.py --variant grpo --steps 3
+
+# The two runs (~40–60 min each on an L4, estimated; same seed, same prompts per step)
+python e2_3_grpo_by_hand.py --variant grpo
+python e2_3_grpo_by_hand.py --variant dr_grpo
+
+# Compare (no GPU): figure, summary table and the two success-criterion checks
+python plot_e2_3.py                       # newest grpo + dr_grpo logs in outputs/
+python plot_e2_3.py <grpo_log.jsonl> <dr_grpo_log.jsonl>
+```
+
+If you run out of GPU memory, lower `e2_3.grpo.micro_batch_size` (gradient accumulation keeps
+the update identical). If the length difference is still small after 200 steps, raise
+`e2_3.grpo.steps`; Liu et al. observe the bias over longer training.
+
+---
+
 ## Planned experiments
 
 | ID | Script | Status |
 |----|--------|--------|
 | E2.1 | `e2_1_cot_from_scratch.py` | Done: Instruct + base model ([results](docs/E2.1_cot_from_scratch.md)) |
 | E2.2 | `e2_2_self_consistency.py` | Done: Instruct + base model ([results](docs/E2.2_self_consistency.md)) |
-| E2.3 | `e2_3_grpo_by_hand.py` | Next |
+| E2.3 | `e2_3_grpo_by_hand.py` | Implemented, ready to run |
 | E2.4 | `e2_4_verifier_study.py` | Planned |
 
 All experiments share `config.yaml` and write results to `outputs/`.

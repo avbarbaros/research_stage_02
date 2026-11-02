@@ -219,6 +219,16 @@ if "e2_1" in cfg:
         if key not in bp.get("zero_shot_cot", {}):
             errors.append(f"Missing e2_1.base_prompts.zero_shot_cot.{key}")
 
+if "e2_3" in cfg:
+    e23 = cfg["e2_3"]
+    for key in ["task", "n_train", "n_eval", "prompts", "lora", "grpo", "variants"]:
+        if key not in e23:
+            errors.append(f"Missing e2_3.{key}")
+    for v in ["grpo", "dr_grpo"]:
+        for switch in ["normalize_by_length", "scale_by_std"]:
+            if switch not in e23.get("variants", {}).get(v, {}):
+                errors.append(f"Missing e2_3.variants.{v}.{switch}")
+
 if errors:
     print()
     for e in errors:
@@ -317,6 +327,7 @@ print("""
     python e2_1_cot_from_scratch.py --n_eval 20   # quick smoke test
     python e2_2_self_consistency.py --n_eval 5    # E2.2 smoke test
     python e2_1_cot_from_scratch.py --model base  # base-model run (Qwen2.5-7B)
+    python e2_3_grpo_by_hand.py --variant grpo --steps 3   # E2.3 smoke test
 
   Results write-ups are in docs/ (start with docs/README.md).
 
