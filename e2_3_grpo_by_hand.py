@@ -292,6 +292,10 @@ for step in range(1, STEPS + 1):
         dbg["epoch"] = epoch
         dbg["variant"] = args.variant
         debug_steps.append(dbg)
+        if step == 3:                           # write as soon as all 3 steps are captured
+            with open(debug_json_path, "w") as f:
+                json.dump(debug_steps, f, indent=2)
+            print(f"Debug JSON (steps 1–3) → {debug_json_path}", flush=True)
     row = {"step": step, "epoch": epoch, **row_raw, "sec": round(time.time() - ts, 1)}
     if step % g["eval_every"] == 0 or step == STEPS:
         row.update(evaluate(step=step, epoch=epoch, eval_jsonl_path=eval_jsonl_path))
@@ -302,12 +306,6 @@ for step in range(1, STEPS + 1):
           f"zero-signal {row['zero_signal_groups']:.2f}  {row['sec']:.0f}s"
           + (f"  | eval acc {row['eval_reward']:.3f} len {row['eval_len']:.1f}" if "eval_reward" in row else ""),
           flush=True)
-
-# Save debug JSON for first 3 steps
-if debug_steps:
-    with open(debug_json_path, "w") as f:
-        json.dump(debug_steps, f, indent=2)
-    print(f"\nDebug JSON (steps 1–3) → {debug_json_path}")
 
 adapter_dir = save_dir / f"{stem}_adapter"
 model.save_pretrained(adapter_dir)
