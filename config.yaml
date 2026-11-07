@@ -150,8 +150,8 @@ e2_3:
     n_operands: 4
     max_operand: 99
     ops: ["+", "-", "*"]
-  n_train: 2000                # training problems (seed), disjoint from eval
-  n_eval: 200                  # held-out problems, greedy decoding
+  n_train: 1000                # training problems (seed), disjoint from eval
+  n_eval: 100                  # held-out problems, greedy decoding
 
   prompts:
     system: >-
@@ -167,8 +167,8 @@ e2_3:
     target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
   grpo:
-    steps: 200                 # one step = prompts_per_step prompts × group_size samples
-    prompts_per_step: 8
+    steps: 1000                # one step = prompts_per_step prompts × group_size samples; 5 epochs over 1000 train problems
+    prompts_per_step: 5
     group_size: 8              # G: samples per prompt; advantages are relative within a group
     micro_batch_size: 8        # sequences per forward/backward (gradient accumulation); lower on OOM
     lr: 2.0e-5

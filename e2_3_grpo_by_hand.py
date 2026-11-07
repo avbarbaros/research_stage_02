@@ -18,6 +18,13 @@ take a clipped policy-gradient step with a KL penalty to the reference model.
 The policy is Qwen2.5-1.5B-Instruct with a LoRA adapter; the reference model is
 the same network with the adapter disabled. All settings: e2_3 in config.yaml.
 
+Outputs
+  {stem}_log.jsonl          one record per step (training metrics + eval when due)
+  {stem}_debug_steps.json   full per-token-level detail for the first 3 steps
+                            (prompts, group outputs, rewards, advantages, loss, KL)
+  {stem}_eval_outputs.jsonl all eval inputs / model outputs / correct flags across
+                            every evaluation run (step + epoch tagged per record)
+
 Usage
   python e2_3_grpo_by_hand.py --variant grpo
   python e2_3_grpo_by_hand.py --variant dr_grpo
@@ -71,6 +78,7 @@ def make_problems(n: int, rng: random.Random, exclude: set) -> list[dict]:
 seen: set = set()
 eval_set = make_problems(c3["n_eval"], random.Random(seed + 1), seen)
 train_set = make_problems(c3["n_train"], random.Random(seed), seen)   # disjoint from eval_set
+N_TRAIN = len(train_set)
 
 def reward(text: str, answer: str) -> float:
     return float(is_correct(extract_pred(text), answer))
@@ -132,12 +140,14 @@ def token_logps(ids: torch.Tensor, attn: torch.Tensor, P: int) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 # GRPO step
 # ---------------------------------------------------------------------------
-def grpo_step(batch: list[dict]) -> dict:
+def grpo_step(batch: list[dict], debug: bool = False) -> dict:
     ro = rollout(batch, G, sample=True)
     r = ro["rewards"].view(B, G)
-    A = r - r.mean(1, keepdim=True)
+    A_raw = r - r.mean(1, keepdim=True)       # unscaled advantages (B×G) — saved for debug
+    A = A_raw.clone()
     if SCALE_STD:
         A = A / (r.std(1, keepdim=True) + 1e-4)
+    A_2d = A.clone()                          # scaled advantages (B×G) — saved for debug
     A = A.reshape(-1)
     N, mb = B * G, g["micro_batch_size"]
     chunks = [slice(i, i + mb) for i in range(0, N, mb)]
@@ -169,7 +179,46 @@ def grpo_step(batch: list[dict]) -> dict:
             stats["loss"] += loss.item() / MU
         stats["grad_norm"] = torch.nn.utils.clip_grad_norm_(model.parameters(), g["max_grad_norm"]).item()
         opt.step()
-    return {**stats, **summarise(ro), "zero_signal_groups": (r.std(1) == 0).float().mean().item()}
+
+    result = {**stats, **summarise(ro), "zero_signal_groups": (r.std(1) == 0).float().mean().item()}
+
+    if debug:
+        # Build a fully annotated record for the first few steps so the GRPO algorithm
+        # can be explained step-by-step (e.g. for a thesis or lecture).
+        dbg = {"batch": []}
+        for i, prob in enumerate(batch):
+            group_data = {
+                "prompt_idx": i,
+                "question": prob["question"],
+                "correct_answer": prob["answer"],
+                "rendered_prompt": render(prob["question"]),
+                "group_mean_reward": r[i].mean().item(),
+                "group_std_reward": r[i].std().item(),
+                "note_zero_signal": bool(r[i].std().item() == 0),
+                "samples": [],
+            }
+            for j in range(G):
+                idx = i * G + j
+                group_data["samples"].append({
+                    "sample_idx": j,
+                    "output": ro["texts"][idx],
+                    "reward": r[i, j].item(),
+                    "advantage_raw": A_raw[i, j].item(),       # r_i − mean(r_group)
+                    "advantage_scaled": A_2d[i, j].item(),     # divided by std if GRPO variant
+                    "length_tokens": int(ro["lengths"][idx].item()),
+                    "truncated": bool(ro["truncated"][idx].item()),
+                })
+            dbg["batch"].append(group_data)
+        dbg["loss"] = stats["loss"]
+        dbg["kl"] = stats["kl"]
+        dbg["grad_norm"] = stats["grad_norm"]
+        dbg["reward"] = result["reward"]
+        dbg["zero_signal_groups"] = result["zero_signal_groups"]
+        dbg["normalize_by_length"] = NORM_LEN
+        dbg["scale_by_std"] = SCALE_STD
+        result["_debug"] = dbg
+
+    return result
 
 def summarise(ro: dict) -> dict:
     """Accuracy and response lengths (tokens), split by correct / incorrect."""
@@ -178,10 +227,21 @@ def summarise(ro: dict) -> dict:
     return {"reward": ro["rewards"].mean().item(), "len": ln.mean().item(), "len_correct": mean(ln[ok]),
             "len_incorrect": mean(ln[~ok]), "truncated": ro["truncated"].float().mean().item()}
 
-def evaluate() -> dict:
+def evaluate(step: int = 0, epoch: float = 0.0, eval_jsonl_path: Path | None = None) -> dict:
     bs, parts = g["eval_batch_size"], []
     for i in range(0, len(eval_set), bs):
         parts.append(rollout(eval_set[i:i + bs], 1, sample=False))
+    if eval_jsonl_path is not None:
+        all_texts = [t for p in parts for t in p["texts"]]
+        with open(eval_jsonl_path, "a") as f:
+            for prob, text in zip(eval_set, all_texts):
+                record = {
+                    "step": step, "epoch": round(epoch, 4),
+                    "question": prob["question"], "answer": prob["answer"],
+                    "output": text,
+                    "correct": bool(reward(text, prob["answer"])),
+                }
+                f.write(json.dumps(record) + "\n")
     merged = {k: torch.cat([p[k] for p in parts]) for k in ("rewards", "lengths", "truncated")}
     return {f"eval_{k}": v for k, v in summarise(merged).items()}
 
@@ -193,9 +253,16 @@ drive = Path(common["drive_output_dir"]) if common.get("drive_output_dir") else 
 if drive:
     drive.mkdir(parents=True, exist_ok=True)
 stem = f"e2_3_{args.variant}_{datetime.now().strftime('%Y%m%d_%H%M')}"
-log_path = (drive or out_dir) / f"{stem}_log.jsonl"         # on Drive: survives a disconnect
+save_dir = drive or out_dir
+
+log_path = save_dir / f"{stem}_log.jsonl"
+eval_jsonl_path = save_dir / f"{stem}_eval_outputs.jsonl"
+debug_json_path = save_dir / f"{stem}_debug_steps.json"
+
 header = {"experiment": "E2.3", "variant": args.variant, "model": model_id, "seed": seed,
-          "variant_settings": variant, "grpo": {**g, "steps": STEPS}, "task": c3["task"], "lora": lc}
+          "variant_settings": variant, "grpo": {**g, "steps": STEPS}, "task": c3["task"], "lora": lc,
+          "n_train": N_TRAIN, "n_eval": len(eval_set),
+          "epochs_total": round(STEPS * B / N_TRAIN, 2)}
 with open(log_path, "w") as f:
     f.write(json.dumps({"_header": header}) + "\n")
 
@@ -205,24 +272,47 @@ def log(row: dict) -> None:
 
 order = list(range(len(train_set)))
 random.Random(seed).shuffle(order)
-ev0 = evaluate()
-log({"step": 0, **ev0})
+
+# Step 0: initial evaluation (epoch 0.0)
+ev0 = evaluate(step=0, epoch=0.0, eval_jsonl_path=eval_jsonl_path)
+log({"step": 0, "epoch": 0.0, **ev0})
 print(f"[{args.variant}] step 0  eval acc {ev0['eval_reward']:.3f}  len {ev0['eval_len']:.1f}", flush=True)
+
+debug_steps: list[dict] = []   # accumulates detail records for steps 1–3
 t0 = time.time()
 for step in range(1, STEPS + 1):
-    batch = [train_set[order[((step - 1) * B + j) % len(order)]] for j in range(B)]   # cycles epochs
+    epoch = round((step * B) / N_TRAIN, 4)
+    batch = [train_set[order[((step - 1) * B + j) % len(order)]] for j in range(B)]
     ts = time.time()
-    row = {"step": step, **grpo_step(batch), "sec": round(time.time() - ts, 1)}
+    capture_debug = step <= 3
+    row_raw = grpo_step(batch, debug=capture_debug)
+    if capture_debug and "_debug" in row_raw:
+        dbg = row_raw.pop("_debug")
+        dbg["step"] = step
+        dbg["epoch"] = epoch
+        dbg["variant"] = args.variant
+        debug_steps.append(dbg)
+    row = {"step": step, "epoch": epoch, **row_raw, "sec": round(time.time() - ts, 1)}
     if step % g["eval_every"] == 0 or step == STEPS:
-        row.update(evaluate())
+        row.update(evaluate(step=step, epoch=epoch, eval_jsonl_path=eval_jsonl_path))
     log(row)
     lc_, li = row["len_correct"], row["len_incorrect"]
-    print(f"[{args.variant}] step {step:4d}/{STEPS}  reward {row['reward']:.3f}  "
-          f"len ✓ {lc_ or 0:5.1f} ✗ {li or 0:5.1f}  kl {row['kl']:.4f}  "
+    print(f"[{args.variant}] step {step:4d}/{STEPS}  ep {epoch:.2f}  reward {row['reward']:.3f}  "
+          f"len ✓ {lc_ or 0:5.1f} ✗ {li or 0:5.1f}  loss {row['loss']:.4f}  kl {row['kl']:.4f}  "
           f"zero-signal {row['zero_signal_groups']:.2f}  {row['sec']:.0f}s"
           + (f"  | eval acc {row['eval_reward']:.3f} len {row['eval_len']:.1f}" if "eval_reward" in row else ""),
           flush=True)
 
-adapter_dir = (drive or out_dir) / f"{stem}_adapter"
+# Save debug JSON for first 3 steps
+if debug_steps:
+    with open(debug_json_path, "w") as f:
+        json.dump(debug_steps, f, indent=2)
+    print(f"\nDebug JSON (steps 1–3) → {debug_json_path}")
+
+adapter_dir = save_dir / f"{stem}_adapter"
 model.save_pretrained(adapter_dir)
-print(f"\nDone in {(time.time() - t0) / 60:.1f} min. Log → {log_path}  Adapter → {adapter_dir}")
+print(f"Done in {(time.time() - t0) / 60:.1f} min.")
+print(f"  Log            → {log_path}")
+print(f"  Eval outputs   → {eval_jsonl_path}")
+print(f"  Debug steps    → {debug_json_path}")
+print(f"  Adapter        → {adapter_dir}")

@@ -2,10 +2,14 @@
 Plot E2.3: GRPO vs. Dr. GRPO from two training logs.
 
 Writes next to the GRPO log:
-  e2_3_compare_<ts>.png / .pdf   four small multiples over training steps
+  e2_3_compare_<ts>.png / .pdf   six small multiples over training steps
       (a) training reward (rolling mean)      (b) held-out accuracy (greedy)
       (c) length of INCORRECT responses       (d) length of CORRECT responses
+      (e) KL divergence (k3 estimator)        (f) policy gradient loss
   e2_3_compare_<ts>.md           summary table: start vs. end of training
+
+Epoch boundaries are drawn as vertical dashed lines on every panel.
+A secondary x-axis showing epoch count is added to the bottom row.
 
 and prints the length-bias check: how much the length of incorrect responses
 changes over training under each variant.
@@ -31,6 +35,7 @@ LABEL   = {"grpo": "GRPO", "dr_grpo": "Dr. GRPO"}
 INK, INK_2, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 WINDOW  = 10        # rolling-mean window (steps) for noisy per-step metrics
 EDGE    = 25        # steps averaged for "start" and "end" in the summary
+EPOCH_COLOR = "#b0aeaa"
 
 
 def load(path: Path) -> tuple[dict, list[dict]]:
@@ -70,6 +75,20 @@ def edge_mean(rows: list[dict], key: str, end: bool) -> float | None:
     return statistics.mean(vals) if vals else None
 
 
+def find_epoch_boundaries(rows: list[dict]) -> list[tuple[int, int]]:
+    """Return (step, epoch_int) pairs where a new integer epoch is first reached."""
+    seen: set[int] = set()
+    boundaries = []
+    for r in rows:
+        ep = r.get("epoch")
+        if ep is not None:
+            ep_int = int(ep)
+            if ep_int > 0 and ep_int not in seen:
+                seen.add(ep_int)
+                boundaries.append((r["step"], ep_int))
+    return boundaries
+
+
 def style(ax, title: str, ylabel: str) -> None:
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
@@ -82,6 +101,31 @@ def style(ax, title: str, ylabel: str) -> None:
     ax.set_ylabel(ylabel, fontsize=9.5, color=INK_2)
 
 
+def add_epoch_markers(ax, boundaries: list[tuple[int, int]], show_labels: bool = True) -> None:
+    """Draw vertical dashed lines and optionally epoch labels at boundaries."""
+    ymin, ymax = ax.get_ylim()
+    label_y = ymin + 0.96 * (ymax - ymin)
+    for step, ep_int in boundaries:
+        ax.axvline(x=step, color=EPOCH_COLOR, linestyle="--", linewidth=0.9, zorder=0)
+        if show_labels:
+            ax.text(step, label_y, f"E{ep_int}", ha="center", va="top",
+                    fontsize=7.5, color=EPOCH_COLOR)
+
+
+def add_epoch_xaxis(ax, boundaries: list[tuple[int, int]], max_step: int) -> None:
+    """Add a secondary x-axis at the top of ax showing epoch numbers."""
+    ax2 = ax.twiny()
+    ax2.set_xlim(ax.get_xlim())
+    ticks = [s for s, _ in boundaries if s <= max_step]
+    labels = [f"E{e}" for _, e in boundaries if _ <= max_step]
+    ax2.set_xticks(ticks)
+    ax2.set_xticklabels(labels, fontsize=8, color=EPOCH_COLOR)
+    ax2.tick_params(colors=EPOCH_COLOR, length=3)
+    for side in ("top", "right", "left", "bottom"):
+        ax2.spines[side].set_visible(False)
+    ax2.set_xlabel("Epoch", fontsize=8.5, color=EPOCH_COLOR)
+
+
 def main() -> None:
     paths = [Path(p) for p in sys.argv[1:3]] if len(sys.argv) >= 3 else find_logs()
     runs = {}
@@ -91,13 +135,23 @@ def main() -> None:
     if set(runs) != {"grpo", "dr_grpo"}:
         raise SystemExit(f"Need one grpo and one dr_grpo log, got {sorted(runs)}")
 
-    panels = [("reward", "(a) Training reward (rolling mean)", "Reward", True),
-              ("eval_reward", "(b) Held-out accuracy (greedy)", "Accuracy", False),
-              ("len_incorrect", "(c) Length of incorrect responses", "Tokens", True),
-              ("len_correct", "(d) Length of correct responses", "Tokens", True)]
-    fig, axes = plt.subplots(2, 2, figsize=(10.5, 7), sharex=True, layout="constrained")
+    # Epoch boundaries from the GRPO run (same schedule for both variants).
+    epoch_boundaries = find_epoch_boundaries(runs["grpo"][1])
+    all_steps = [r["step"] for r in runs["grpo"][1]]
+    max_step = max(all_steps) if all_steps else 0
+
+    panels = [
+        ("reward",       "(a) Training reward (rolling mean)",    "Reward",   True,  False),
+        ("eval_reward",  "(b) Held-out accuracy (greedy)",        "Accuracy", False, False),
+        ("len_incorrect","(c) Length of incorrect responses",     "Tokens",   True,  False),
+        ("len_correct",  "(d) Length of correct responses",       "Tokens",   True,  False),
+        ("kl",           "(e) KL divergence (k3 estimator)",      "KL",       True,  True),
+        ("loss",         "(f) Policy gradient loss",              "Loss",     True,  True),
+    ]
+    fig, axes = plt.subplots(3, 2, figsize=(11, 11), layout="constrained")
     fig.patch.set_facecolor("white")
-    for ax, (key, title, ylabel, smooth) in zip(axes.flat, panels):
+
+    for ax, (key, title, ylabel, smooth, is_bottom) in zip(axes.flat, panels):
         style(ax, title, ylabel)
         ends = {}
         for v in ("grpo", "dr_grpo"):
@@ -108,23 +162,39 @@ def main() -> None:
                     marker=None if smooth else "o", ms=6, mec="white", mew=1.2)
             if ys:
                 ends[v] = (xs[-1], ys[-1])
-        # Selective direct labels: final value only, nudged apart when the two ends are close.
+
+        # Epoch markers (draw after data so ylim is set).
+        add_epoch_markers(ax, epoch_boundaries, show_labels=True)
+
+        # Secondary epoch x-axis on bottom-row panels.
+        if is_bottom and epoch_boundaries:
+            add_epoch_xaxis(ax, epoch_boundaries, max_step)
+
+        # Selective direct labels: final value only, nudged apart when close.
         lo, hi = ax.get_ylim()
         close = len(ends) == 2 and abs(ends["grpo"][1] - ends["dr_grpo"][1]) < 0.05 * (hi - lo)
         for v, (x, y) in ends.items():
             other = [e[1] for w, e in ends.items() if w != v]
             higher = not other or y > other[0] or (y == other[0] and v == "grpo")
             dy = (6 if higher else -6) if close else 0
-            ax.annotate(f"{y:.2f}" if key in ("reward", "eval_reward") else f"{y:.0f}",
-                        xy=(x, y), xytext=(4, dy), textcoords="offset points",
+            fmt_v = f"{y:.4f}" if key == "kl" else (f"{y:.2f}" if key in ("reward", "eval_reward", "loss") else f"{y:.0f}")
+            ax.annotate(fmt_v, xy=(x, y), xytext=(4, dy), textcoords="offset points",
                         va="center", fontsize=8.5, color=INK)
-    for ax in axes[1]:
+
+    # x-axis label on the four non-bottom panels (bottom panels have epoch twin axis).
+    for ax, (_, _, _, _, is_bottom) in zip(axes.flat, panels):
         ax.set_xlabel("Training step", fontsize=9.5, color=INK_2)
+
     axes[0, 0].legend(loc="lower right", frameon=False, fontsize=9, labelcolor=INK_2)
     h = runs["grpo"][0]
-    fig.suptitle(f"E2.3 — GRPO vs. Dr. GRPO on {h['model']}, arithmetic task, "
-                 f"G={h['grpo']['group_size']}, β={h['grpo']['kl_coef']}",
-                 x=0.01, ha="left", fontsize=11, color=INK)
+    n_train = h.get("n_train", "?")
+    epochs_total = h.get("epochs_total", "?")
+    fig.suptitle(
+        f"E2.3 — GRPO vs. Dr. GRPO · {h['model']}, arithmetic task, "
+        f"G={h['grpo']['group_size']}, β={h['grpo']['kl_coef']}, "
+        f"B={h['grpo']['prompts_per_step']}, {n_train} train, {epochs_total} epochs",
+        x=0.01, ha="left", fontsize=10.5, color=INK,
+    )
 
     stem = runs["grpo"][2].parent / f"e2_3_compare_{datetime.now().strftime('%Y%m%d_%H%M')}"
     for ext in ("png", "pdf"):
@@ -132,10 +202,15 @@ def main() -> None:
         print(f"Saved → {stem}.{ext}")
 
     # ---- summary table: first vs. last EDGE training steps --------------
-    metrics = [("reward", "Training reward"), ("len_incorrect", "Length, incorrect (tokens)"),
-               ("len_correct", "Length, correct (tokens)"), ("truncated", "Truncated share"),
-               ("zero_signal_groups", "Zero-signal groups"), ("kl", "KL to reference")]
-    fmt = lambda x: "—" if x is None else (f"{x:.3f}" if abs(x) < 10 else f"{x:.1f}")
+    metrics = [("reward",             "Training reward"),
+               ("len_incorrect",      "Length, incorrect (tokens)"),
+               ("len_correct",        "Length, correct (tokens)"),
+               ("truncated",          "Truncated share"),
+               ("zero_signal_groups", "Zero-signal groups"),
+               ("kl",                 "KL to reference"),
+               ("loss",               "Policy gradient loss")]
+    fmt = lambda x: "—" if x is None else (f"{x:.4f}" if x != 0 and abs(x) < 0.01 else
+                                            (f"{x:.3f}" if abs(x) < 10 else f"{x:.1f}"))
     lines = [f"| Metric (mean of first / last {EDGE} steps) | GRPO start | GRPO end | Dr. GRPO start | Dr. GRPO end |",
              "|---|---:|---:|---:|---:|"]
     for key, name in metrics:
