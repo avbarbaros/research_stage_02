@@ -413,12 +413,12 @@ bias is visible in your own logs.
 
 ### How it works
 
-- **Task:** generated integer arithmetic, e.g. `Compute: 37 * 14 - 85 * 6 + 9` (4 operands
-  ≤ 99, `+ - *`). 2,000 training and 200 held-out problems, disjoint. Reward = 1 if the
+- **Task:** generated integer arithmetic, e.g. `Compute: 89 - 54 * 70 * 5` (4 operands
+  ≤ 99, `+ - *`). 1,000 training and 100 held-out problems, disjoint. Reward = 1 if the
   extracted answer is exactly right, else 0.
 - **Policy:** `Qwen2.5-1.5B-Instruct` + LoRA (r = 16, all projection layers). The reference
   model for the KL term is the same network with the adapter disabled, so it costs no memory.
-- **Step:** 8 prompts × G = 8 samples (T = 0.9, top_p 1.0, top_k off, ≤ 256 tokens) → rewards →
+- **Step:** 5 prompts × G = 8 samples (T = 0.9, top_p 1.0, top_k off, ≤ 256 tokens) → rewards →
   group-relative advantages → one clipped policy-gradient update with a k3 KL penalty (β = 0.01).
 - **Variants** (`e2_3.variants`), identical except for two switches:
 
@@ -440,7 +440,7 @@ bias is visible in your own logs.
 # Smoke test (a few minutes): check the log prints sensible rewards and lengths
 python e2_3_grpo_by_hand.py --variant grpo --steps 3
 
-# The two runs (~2 h each on an L4: ~32 s per step plus evaluations; same seed, same prompts per step)
+# The two runs (~5.5 h each on an L4: ~32 s per step plus evaluations; same seed, same prompts per step)
 python e2_3_grpo_by_hand.py --variant grpo
 python e2_3_grpo_by_hand.py --variant dr_grpo
 
@@ -450,8 +450,8 @@ python plot_e2_3.py <grpo_log.jsonl> <dr_grpo_log.jsonl>
 ```
 
 If you run out of GPU memory, lower `e2_3.grpo.micro_batch_size` (gradient accumulation keeps
-the update identical). If the length difference is still small after 200 steps, raise
-`e2_3.grpo.steps`; Liu et al. observe the bias over longer training.
+the update identical). The default of 600 steps (3 epochs) is sufficient for the length bias
+to emerge; Liu et al. observe larger effects over even longer training.
 
 ---
 

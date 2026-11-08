@@ -167,7 +167,7 @@ e2_3:
     target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
   grpo:
-    steps: 1000                # one step = prompts_per_step prompts × group_size samples; 5 epochs over 1000 train problems
+    steps: 600                # one step = prompts_per_step prompts × group_size samples; 3 epochs over 1000 train problems
     prompts_per_step: 5
     group_size: 8              # G: samples per prompt; advantages are relative within a group
     micro_batch_size: 8        # sequences per forward/backward (gradient accumulation); lower on OOM
