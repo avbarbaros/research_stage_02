@@ -20,14 +20,19 @@ Success criterion (roadmap §2.2): process supervision outperforms outcome super
 at matched n, replicating the qualitative finding of Lightman et al. (2023).
 
 Phases
-  generate  — sample CPQ_TRAIN completions per training question (n_train_traces total)
-              and N_EVAL_COMPLETIONS per eval question; save to JSONL
-  train_orm — fine-tune an RM backbone on (question + solution → 0/1) labels
-  train_prm — fine-tune on (question + partial_solution → 0/1) with outcome propagation:
-              each step prefix inherits the final answer correctness label
-  evaluate  — load both RMs, re-score n eval completions per question, compute
-              accuracy at each n in best_of_n_values
-  all       — run all four phases in sequence
+  generate_train — sample CPQ_TRAIN completions per training question; create/overwrite
+                   the traces file with train records only
+  generate_eval  — sample N_EVAL_COMPLETIONS per eval question; append to the traces file
+                   (creates it if it does not exist yet).  Uses at most 8 completions per
+                   model.generate() call and 1 question per batch to stay within the 24 GB
+                   GPU budget (naive 32 × 4 = 128-sequence batches cause OOM on L4).
+  generate       — run generate_train then generate_eval in one session
+  train_orm      — fine-tune an RM backbone on (question + solution → 0/1) labels
+  train_prm      — fine-tune on (question + partial_solution → 0/1) with outcome
+                   propagation: each step prefix inherits the final answer label
+  evaluate       — load both RMs, re-score n eval completions per question, compute
+                   accuracy at each n in best_of_n_values
+  all            — run all phases in sequence
 
 Outputs (in common.output_dir or drive_output_dir)
   e2_4_traces_<stem>.jsonl      train + eval traces with correctness labels
@@ -37,7 +42,8 @@ Outputs (in common.output_dir or drive_output_dir)
 
 Usage
   python e2_4_verifier_study.py --phase all
-  python e2_4_verifier_study.py --phase generate
+  python e2_4_verifier_study.py --phase generate_train
+  python e2_4_verifier_study.py --phase generate_eval  --traces_file outputs/e2_4_traces_STEM.jsonl
   python e2_4_verifier_study.py --phase train_orm --traces_file outputs/e2_4_traces_STEM.jsonl
   python e2_4_verifier_study.py --phase train_prm  --traces_file outputs/e2_4_traces_STEM.jsonl
   python e2_4_verifier_study.py --phase evaluate \\
@@ -71,7 +77,8 @@ from reasoning_utils import (
 parser = argparse.ArgumentParser()
 parser.add_argument("--config",       default="config.yaml")
 parser.add_argument("--phase",        required=True,
-                    choices=["generate", "train_orm", "train_prm", "evaluate", "all"])
+                    choices=["generate", "generate_train", "generate_eval",
+                             "train_orm", "train_prm", "evaluate", "all"])
 parser.add_argument("--traces_file",  default=None, help="Traces JSONL for phases 2–4")
 parser.add_argument("--orm_path",     default=None, help="Trained ORM dir for evaluate")
 parser.add_argument("--prm_path",     default=None, help="Trained PRM dir for evaluate")
@@ -151,7 +158,8 @@ def split_steps(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # Phase 1: Generate traces
 # ---------------------------------------------------------------------------
-def run_generate() -> None:
+def _load_generator():
+    """Load the generator LLM. Caller is responsible for del + torch.cuda.empty_cache()."""
     print(f"[generate] Loading generator: {GEN_MODEL_ID}", flush=True)
     gen_tok = AutoTokenizer.from_pretrained(GEN_MODEL_ID)
     gen_tok.padding_side = "left"
@@ -184,34 +192,77 @@ def run_generate() -> None:
             texts.append(gen_tok.decode(comp[:L], skip_special_tokens=True))
         return texts
 
-    def write_split(split: str, questions: list[dict], n_per_q: int, f) -> None:
-        BATCH_Q = 4  # questions per GPU batch (n_per_q completions each)
-        for i in range(0, len(questions), BATCH_Q):
-            batch = questions[i:i + BATCH_Q]
-            texts = gen_batch([ex["question"] for ex in batch], n_per_q)
-            for j, ex in enumerate(batch):
-                for k in range(n_per_q):
-                    text = texts[j * n_per_q + k]
-                    f.write(json.dumps({
-                        "split": split, "question": ex["question"], "gt": ex["gt"],
-                        "text": text,
-                        "correct": is_correct(extract_pred(text), ex["gt"]),
-                    }) + "\n")
-            if (i // BATCH_Q + 1) % 20 == 0:
-                print(f"  {split} {min(i + BATCH_Q, len(questions))}/{len(questions)}", flush=True)
+    return gen_model, gen_tok, gen_batch
 
+
+def _write_split(split: str, questions: list[dict], n_per_q: int, f, gen_batch) -> None:
+    """Write completions to open file f; flushes after every question batch.
+
+    Uses at most CHUNK completions per model.generate() call to stay within the 24 GB
+    GPU budget.  For train (n_per_q=5) BATCH_Q=4 keeps throughput up.  For eval
+    (n_per_q=32) BATCH_Q=1 and four 8-completion calls per question avoid OOM.
+    """
+    CHUNK   = 8
+    BATCH_Q = 4 if n_per_q <= CHUNK else 1
+
+    for i in range(0, len(questions), BATCH_Q):
+        batch = questions[i:i + BATCH_Q]
+        per_q: list[list[str]] = [[] for _ in batch]
+
+        remaining = n_per_q
+        while remaining > 0:
+            n_chunk = min(CHUNK, remaining)
+            texts   = gen_batch([ex["question"] for ex in batch], n_chunk)
+            for j in range(len(batch)):
+                per_q[j].extend(texts[j * n_chunk:(j + 1) * n_chunk])
+            remaining -= n_chunk
+
+        for j, ex in enumerate(batch):
+            for text in per_q[j]:
+                f.write(json.dumps({
+                    "split": split, "question": ex["question"], "gt": ex["gt"],
+                    "text": text,
+                    "correct": is_correct(extract_pred(text), ex["gt"]),
+                }) + "\n")
+        f.flush()  # survive an OOM or disconnect on the next iteration
+
+        done = min(i + BATCH_Q, len(questions))
+        if done % (BATCH_Q * 20) == 0 or done == len(questions):
+            print(f"  {split} {done}/{len(questions)}", flush=True)
+
+
+def run_generate_train() -> None:
+    """Phase generate_train: generate train traces; creates / overwrites the traces file."""
+    gen_model, gen_tok, gen_batch = _load_generator()
+    print(f"[generate_train] GSM8K train: {N_TRAIN_Q} questions × {CPQ_TRAIN} completions",
+          flush=True)
+    train_qs = select_subset(load_gsm8k("train"), N_TRAIN_Q, seed)
     with open(traces_path, "w") as f:
-        print(f"[generate] GSM8K train: {N_TRAIN_Q} questions × {CPQ_TRAIN} completions", flush=True)
-        train_qs = select_subset(load_gsm8k("train"), N_TRAIN_Q, seed)
-        write_split("train", train_qs, CPQ_TRAIN, f)
-
-        print(f"[generate] GSM8K test:  {N_EVAL} questions × {N_EVAL_COMPLETIONS} completions", flush=True)
-        eval_qs = select_subset(load_gsm8k("test"), N_EVAL, seed)
-        write_split("eval", eval_qs, N_EVAL_COMPLETIONS, f)
-
-    print(f"[generate] Traces → {traces_path}", flush=True)
+        _write_split("train", train_qs, CPQ_TRAIN, f, gen_batch)
+    print(f"[generate_train] Train traces → {traces_path}", flush=True)
     del gen_model, gen_tok
     torch.cuda.empty_cache()
+
+
+def run_generate_eval() -> None:
+    """Phase generate_eval: generate eval traces; appends to an existing traces file."""
+    gen_model, gen_tok, gen_batch = _load_generator()
+    print(f"[generate_eval] GSM8K test: {N_EVAL} questions × {N_EVAL_COMPLETIONS} completions",
+          flush=True)
+    eval_qs = select_subset(load_gsm8k("test"), N_EVAL, seed)
+    # Append when train traces already exist in the file, create otherwise
+    mode = "a" if traces_path.exists() else "w"
+    with open(traces_path, mode) as f:
+        _write_split("eval", eval_qs, N_EVAL_COMPLETIONS, f, gen_batch)
+    print(f"[generate_eval] Eval traces → {traces_path}", flush=True)
+    del gen_model, gen_tok
+    torch.cuda.empty_cache()
+
+
+def run_generate() -> None:
+    """Phase generate: generate train traces then eval traces in one go."""
+    run_generate_train()
+    run_generate_eval()
 
 
 # ---------------------------------------------------------------------------
@@ -467,7 +518,11 @@ def run_evaluate(traces: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-if args.phase in ("generate", "all"):
+if args.phase == "generate_train":
+    run_generate_train()
+elif args.phase == "generate_eval":
+    run_generate_eval()
+elif args.phase in ("generate", "all"):
     run_generate()
 
 traces: list[dict] | None = None
