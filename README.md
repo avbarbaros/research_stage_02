@@ -25,8 +25,8 @@ research_stage_02/
 ├── plot_e2_2.py                 # E2.2 — scaling-curve figure + table from the results JSON
 ├── e2_3_grpo_by_hand.py         # E2.3 — GRPO / Dr. GRPO on a toy arithmetic task (LoRA)
 ├── plot_e2_3.py                 # E2.3 — GRPO vs. Dr. GRPO comparison figure + table
+├── e2_4_verifier_study.py       # E2.4 — ORM vs. PRM best-of-n reranking on GSM8K
 ├── setup.py                     # installs packages, checks GPU, validates config.yaml
-│                                #        (script for E2.4 to be added)
 │
 ├── docs/                        # results write-ups (one page per run) + figures
 │
@@ -137,6 +137,7 @@ file and prints the "clean scaling curve" checks. Plotting needs no GPU.
 | 4 | `e2_2_self_consistency.py --greedy_ref …` | yes | ~2–3 h (est.) | **yes** | 3 (zero-shot file) |
 | 5 | `plot_e2_2.py …` | no | seconds | – | 4 |
 | B | base-model runs (`--model base`, 100 questions) | yes | ~50 min E2.1 + ~30 min E2.2 | E2.2 only | 1 |
+| 6 | `e2_4_verifier_study.py --phase all` | yes | ~4–6 h total | **yes (by phase)** | 1 |
 
 ---
 
@@ -455,6 +456,80 @@ to emerge; Liu et al. observe larger effects over even longer training.
 
 ---
 
+## E2.4 — Verifier Study
+
+**Goal:** train an outcome reward model (ORM) and a process reward model (PRM) on GSM8K traces,
+then compare best-of-n reranking accuracy at n ∈ {1, 4, 8, 16, 32}. Success criterion: PRM ≥ ORM at
+matched n, replicating the qualitative finding of Lightman et al. (2023).
+
+**Paper:** Lightman et al. (2023) arXiv:2305.20050 (PRM800K)
+
+### How it works
+
+- **Generator:** `Qwen2.5-7B-Instruct`, zero-shot CoT, temperature 0.7, top-p 0.95.
+- **Train traces:** 5 completions × 1,000 GSM8K train questions = 5,000 (question, solution, label) pairs.
+- **Eval traces:** 32 completions × 300 GSM8K test questions (same 300 as E2.1 / E2.2).
+- **ORM:** `Qwen2.5-1.5B-Instruct` + linear head, trained on (question + full solution → 0/1).
+- **PRM:** same backbone, trained on (question + step prefix → 0/1) with **outcome propagation**:
+  every step in a correct solution is labelled 1, every step in an incorrect one is labelled 0.
+- **PRM scoring:** split each solution on paragraph breaks, score each step prefix, take the minimum
+  step score (pessimistic aggregation — the weakest step governs).
+- **Best-of-n:** pick the highest-scoring solution among n candidates; compare ORM vs. PRM vs. oracle.
+
+### Run
+
+```bash
+# Full run — all phases in sequence (~4–6 h on an L4)
+python e2_4_verifier_study.py --phase all
+
+# Or run phases separately (after a disconnect, skip completed phases)
+python e2_4_verifier_study.py --phase generate
+python e2_4_verifier_study.py --phase train_orm --traces_file outputs/e2_4_traces_STEM.jsonl
+python e2_4_verifier_study.py --phase train_prm  --traces_file outputs/e2_4_traces_STEM.jsonl
+python e2_4_verifier_study.py --phase evaluate \
+    --traces_file outputs/e2_4_traces_STEM.jsonl \
+    --orm_path outputs/e2_4_orm_STEM \
+    --prm_path outputs/e2_4_prm_STEM
+
+# Smoke test (~2–3 min)
+python e2_4_verifier_study.py --phase all --n_smoke 20
+```
+
+The `--stem` flag sets a consistent output name across phases (default: datestamp of first phase).
+
+### Configuration (`e2_4` in `config.yaml`)
+
+| Key | Default | What it controls |
+|-----|---------|-----------------|
+| `n_train_traces` | 5,000 | Total training (question, solution) pairs (1,000 questions × 5 completions) |
+| `n_eval` | 300 | Eval questions (same seed as E2.1 / E2.2 → same 300 questions) |
+| `best_of_n_values` | `[1, 4, 8, 16, 32]` | Reranking sizes |
+| `outcome_rm_training.epochs` / `lr` | 3 / 2e-5 | ORM training |
+| `outcome_rm_training.batch_size` / `max_seq_len` | 16 / 512 | ORM training |
+| `process_rm_training.batch_size` / `max_seq_len` | 8 / 1,024 | PRM training (longer sequences for step prefixes) |
+| `process_rm_training.step_label_strategy` | `outcome_propagation` | Label each step prefix with the final answer correctness |
+| `models.outcome_rm` | `""` → falls back to `models.grpo_policy` (1.5B) | RM backbone |
+
+### Output format
+
+`e2_4_results_<stem>.json`:
+
+```json
+{
+  "best_of_n": {
+    "n":           [1,  4,  8, 16, 32],
+    "k1_baseline": [73, 73, 73, 73, 73],
+    "orm":         [73, 78, 81, 84, 85],
+    "prm":         [73, 80, 84, 87, 88],
+    "oracle":      [73, 90, 94, 97, 98]
+  },
+  "paired_prm_vs_orm": {"n": 32, "diff_pp": 3.0, "mcnemar_p": 0.02}
+}
+```
+*(numbers above are illustrative — fill in after the run)*
+
+---
+
 ## Planned experiments
 
 | ID | Script | Status |
@@ -462,7 +537,7 @@ to emerge; Liu et al. observe larger effects over even longer training.
 | E2.1 | `e2_1_cot_from_scratch.py` | Done: Instruct + base model ([results](docs/E2.1_cot_from_scratch.md)) |
 | E2.2 | `e2_2_self_consistency.py` | Done: Instruct + base model ([results](docs/E2.2_self_consistency.md)) |
 | E2.3 | `e2_3_grpo_by_hand.py` | Done: GRPO + Dr. GRPO ([results](docs/E2.3_grpo_results.md)) |
-| E2.4 | `e2_4_verifier_study.py` | Planned |
+| E2.4 | `e2_4_verifier_study.py` | Script ready — pending run ([implementation](docs/E2.4_verifier_study.md)) |
 
 All experiments share `config.yaml` and write results to `outputs/`.
 
