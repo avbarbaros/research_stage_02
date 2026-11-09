@@ -156,10 +156,14 @@ def table(data: dict, out_stem: Path) -> None:
     ]
 
     if cmp:
+        # cmp['n'] is the number of questions in the McNemar test (n_questions), not best-of-n.
+        # Use the last entry of bon['n'] as the reranking n.
+        bon_n = ns[-1]
         lines += [
-            f"**PRM vs ORM at n = {cmp.get('n', '?')}:** "
+            f"**PRM vs ORM at best-of-{bon_n}:** "
             f"+{cmp.get('diff_pp', 0):.2f} pp  "
-            f"(McNemar p = {cmp.get('mcnemar_p', '?')}) — "
+            f"(McNemar p = {cmp.get('mcnemar_p', '?')}, "
+            f"n = {cmp.get('n', '?')} questions) — "
             f"{cmp.get('b_only_correct', '?')} PRM-only vs "
             f"{cmp.get('a_only_correct', '?')} ORM-only correct",
         ]
@@ -193,12 +197,13 @@ def checks(data: dict) -> None:
         print(f"  ⚠  PRM drops at n={bon['n'][first_drop + 1]}")
 
     # PRM > ORM at n=32?
-    prm_32, orm_32 = prm[-1], orm[-1]
-    diff = prm_32 - orm_32
+    prm_last, orm_last = prm[-1], orm[-1]
+    n_last = bon["n"][-1]
+    diff = prm_last - orm_last
     cmp  = data.get("paired_prm_vs_orm", {})
     sig  = "✓ p < 0.05" if cmp.get("mcnemar_p", 1) < 0.05 else f"⚠  p = {cmp.get('mcnemar_p', '?')} (not significant)"
     sym  = ">" if diff > 0 else "<="
-    print(f"  {'✓' if diff > 0 else '✗'}  PRM@32 ({prm_32:.2f}%) {sym} ORM@32 ({orm_32:.2f}%): "
+    print(f"  {'✓' if diff > 0 else '✗'}  PRM@{n_last} ({prm_last:.2f}%) {sym} ORM@{n_last} ({orm_last:.2f}%): "
           f"{diff:+.2f} pp  {sig}")
 
     # Oracle gap
