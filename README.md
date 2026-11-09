@@ -526,7 +526,7 @@ The `--stem` flag sets a consistent output name across phases (default: datestam
   "paired_prm_vs_orm": {"n": 32, "diff_pp": 3.0, "mcnemar_p": 0.02}
 }
 ```
-*(numbers above are illustrative — fill in after the run)*
+*(numbers above are illustrative — see [docs/E2.4_verifier_results.md](docs/E2.4_verifier_results.md) for actual results)*
 
 ---
 
@@ -537,7 +537,7 @@ The `--stem` flag sets a consistent output name across phases (default: datestam
 | E2.1 | `e2_1_cot_from_scratch.py` | Done: Instruct + base model ([results](docs/E2.1_cot_from_scratch.md)) |
 | E2.2 | `e2_2_self_consistency.py` | Done: Instruct + base model ([results](docs/E2.2_self_consistency.md)) |
 | E2.3 | `e2_3_grpo_by_hand.py` | Done: GRPO + Dr. GRPO ([results](docs/E2.3_grpo_results.md)) |
-| E2.4 | `e2_4_verifier_study.py` | Script ready — pending run ([implementation](docs/E2.4_verifier_study.md)) |
+| E2.4 | `e2_4_verifier_study.py` | Done: PRM 90.98% > ORM 89.10% at n=32; ORM overoptimises at large n ([implementation](docs/E2.4_verifier_study.md), [results](docs/E2.4_verifier_results.md)) |
 
 All experiments share `config.yaml` and write results to `outputs/`.
 
