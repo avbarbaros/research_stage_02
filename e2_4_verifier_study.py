@@ -53,6 +53,8 @@ Usage
   python e2_4_verifier_study.py --phase all --n_smoke 20   # quick sanity check
 """
 
+import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # less fragmentation
 import json
 import time
 import random
@@ -306,8 +308,14 @@ def train_rm(rm_type: str, traces: list[dict], save_path: Path, train_cfg: dict)
         RM_MODEL_ID, num_labels=1, torch_dtype=dtype, device_map="auto",
     )
     model.config.pad_token_id = tok.pad_token_id
+    model.config.use_cache = False
+    # Recompute activations in the backward pass instead of storing them.
+    # Without this, a 16 x 512 batch needs ~17 GB of activations on top of
+    # ~12 GB for weights + grads + AdamW state, which overflows a 22 GB GPU.
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     model.train()
     dev = model.device
+    micro_bs = train_cfg.get("micro_batch_size", train_cfg["batch_size"])
 
     max_len = train_cfg["max_seq_len"]
     dataset = RMDataset(traces, rm_type)
@@ -328,15 +336,26 @@ def train_rm(rm_type: str, traces: list[dict], save_path: Path, train_cfg: dict)
             ids    = batch["input_ids"].to(dev)
             attn   = batch["attention_mask"].to(dev)
             labels = batch["labels"].to(dev).float()
-            logits = model(input_ids=ids, attention_mask=attn).logits.squeeze(-1)
-            loss   = loss_fn(logits, labels)
-            loss.backward()
+            bs     = len(labels)
+            # Split the batch into micro-batches and accumulate gradients, so the
+            # effective batch size (and the loss) matches a single full batch.
+            batch_loss = 0.0
+            for i in range(0, bs, micro_bs):
+                mb_ids, mb_attn = ids[i:i + micro_bs], attn[i:i + micro_bs]
+                mb_labels       = labels[i:i + micro_bs]
+                # Trim padding columns this micro-batch doesn't need (right padding).
+                mb_len  = int(mb_attn.sum(dim=1).max())
+                logits  = model(input_ids=mb_ids[:, :mb_len],
+                                attention_mask=mb_attn[:, :mb_len]).logits.squeeze(-1).float()
+                loss    = loss_fn(logits, mb_labels) * (len(mb_labels) / bs)
+                loss.backward()
+                batch_loss += loss.item()
+                n_correct  += ((logits.detach() > 0) == mb_labels.bool()).sum().item()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-            opt.zero_grad()
-            total_loss += loss.item()
-            n_correct  += ((torch.sigmoid(logits) > 0.5) == labels.bool()).sum().item()
-            n_total    += len(labels)
+            opt.zero_grad(set_to_none=True)
+            total_loss += batch_loss
+            n_total    += bs
         print(f"  epoch {epoch}/{train_cfg['epochs']}  "
               f"loss {total_loss / len(loader):.4f}  "
               f"acc {n_correct / n_total * 100:.1f}%  "
@@ -346,7 +365,7 @@ def train_rm(rm_type: str, traces: list[dict], save_path: Path, train_cfg: dict)
     model.save_pretrained(save_path)
     tok.save_pretrained(save_path)
     print(f"[train_{rm_type}] Saved → {save_path}", flush=True)
-    del model, tok
+    del model, tok, opt
     torch.cuda.empty_cache()
 
 

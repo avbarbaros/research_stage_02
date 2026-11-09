@@ -216,11 +216,13 @@ e2_4:
     epochs: 3
     lr: 2.0e-5
     batch_size: 16
+    micro_batch_size: 8      # gradient accumulation: 2 micro-batches per optimizer step
     max_seq_len: 512
 
   process_rm_training:
     epochs: 3
     lr: 2.0e-5
     batch_size: 8
+    micro_batch_size: 4      # gradient accumulation: 2 micro-batches per optimizer step
     max_seq_len: 1024
     step_label_strategy: "outcome_propagation"
