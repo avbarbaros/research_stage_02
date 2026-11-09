@@ -381,11 +381,17 @@ def run_train_prm(traces: list[dict]) -> None:
 # Phase 4: Evaluate best-of-n
 # ---------------------------------------------------------------------------
 @torch.no_grad()
-def score_orm(model, tok, questions: list[str], solutions: list[str], max_len: int) -> list[float]:
+def score_orm(model, tok, questions: list[str], solutions: list[str], max_len: int,
+              chunk: int = 16) -> list[float]:
+    """Score (question, solution) pairs in chunks to stay within GPU memory."""
     texts  = [format_rm_input(q, s) for q, s in zip(questions, solutions)]
-    enc    = tok(texts, truncation=True, max_length=max_len, padding=True, return_tensors="pt")
-    logits = model(**enc.to(model.device)).logits.squeeze(-1)
-    return torch.sigmoid(logits).tolist()
+    scores: list[float] = []
+    for i in range(0, len(texts), chunk):
+        enc    = tok(texts[i:i + chunk], truncation=True, max_length=max_len,
+                     padding=True, return_tensors="pt")
+        logits = model(**enc.to(model.device)).logits.squeeze(-1)
+        scores.extend(torch.sigmoid(logits).tolist())
+    return scores
 
 
 @torch.no_grad()
@@ -438,24 +444,16 @@ def run_evaluate(traces: list[dict]) -> None:
     )
     orm.eval()
 
+    # Score one question at a time (up to 32 solutions each); score_orm chunks
+    # those 32 sequences internally to avoid OOM (16 at a time).
     orm_scores: dict[str, list[float]] = {}
-    BATCH_ORM = 32
-    for i in range(0, len(questions), BATCH_ORM):
-        batch_qs = questions[i:i + BATCH_ORM]
-        q_list, s_list = [], []
-        sol_counts = []
-        for q in batch_qs:
-            sols = by_q[q]["solutions"]
-            q_list.extend([q] * len(sols))
-            s_list.extend(s["text"] for s in sols)
-            sol_counts.append(len(sols))
-        scores_flat = score_orm(orm, orm_tok, q_list, s_list, orm_cfg["max_seq_len"])
-        offset = 0
-        for q, cnt in zip(batch_qs, sol_counts):
-            orm_scores[q] = scores_flat[offset:offset + cnt]
-            offset += cnt
-        if (i // BATCH_ORM + 1) % 5 == 0:
-            print(f"  ORM {min(i + BATCH_ORM, len(questions))}/{len(questions)}", flush=True)
+    for i, q in enumerate(questions):
+        sols = by_q[q]["solutions"]
+        orm_scores[q] = score_orm(orm, orm_tok,
+                                  [q] * len(sols), [s["text"] for s in sols],
+                                  orm_cfg["max_seq_len"])
+        if (i + 1) % 25 == 0:
+            print(f"  ORM {i + 1}/{len(questions)}", flush=True)
 
     del orm, orm_tok
     torch.cuda.empty_cache()
